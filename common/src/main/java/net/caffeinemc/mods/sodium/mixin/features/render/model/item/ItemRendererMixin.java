@@ -42,14 +42,6 @@ public class ItemRendererMixin {
     @Unique
     private static final Vector3f VERTEX_1 = new Vector3f();
     @Unique
-    private static final Vector3f VERTEX_2 = new Vector3f();
-    @Unique
-    private static final Vector3f VERTEX_3 = new Vector3f();
-    @Unique
-    private static final Vector3f EDGE_1 = new Vector3f();
-    @Unique
-    private static final Vector3f EDGE_2 = new Vector3f();
-    @Unique
     private static final Vector3f NORMAL = new Vector3f();
 
     @Unique
@@ -136,10 +128,6 @@ public class ItemRendererMixin {
         currentRenderContext = ItemDisplayContext.NONE;
     }
 
-    /**
-     * @reason Optimized item model rendering with backface culling
-     * @author JellySquid
-     */
     @Inject(method = "renderModelLists", at = @At("HEAD"), cancellable = true)
     private void renderModelFast(BakedModel model, ItemStack itemStack, int light, int overlay, PoseStack matrixStack, VertexConsumer vertexConsumer, CallbackInfo ci) {
         var writer = VertexConsumerUtils.convertOrLog(vertexConsumer);
@@ -170,18 +158,38 @@ public class ItemRendererMixin {
     }
 
     @Unique
-    private void renderBakedItemQuads(PoseStack.Pose matrices, VertexBufferWriter writer, List<BakedQuad> quads,
-                                      ItemStack itemStack, ItemColor colorProvider, int light, int overlay) {
-        int quadCount = quads.size();
+    private void renderBakedItemQuads(PoseStack.Pose matrices, VertexBufferWriter writer, List<BakedQuad> quads, ItemStack itemStack, ItemColor colorProvider, int light, int overlay) {
+        final int quadCount = quads.size();
+        if (quadCount == 0) return;
+
+        final boolean shouldMultiplyAlpha = BakedModelEncoder.shouldMultiplyAlpha();
+        final int defaultColor = 0xFFFFFFFF;
+
+        if (colorProvider == null) {
+            for (int i = 0; i < quadCount; i++) {
+                BakedQuad bakedQuad = quads.get(i);
+                if (bakedQuad.getVertices().length < 32) continue;
+
+                if (!isFacingAway(matrices, bakedQuad)) {
+                    BakedQuadView quad = (BakedQuadView) bakedQuad;
+                    BakedModelEncoder.writeQuadVertices(writer, matrices, quad, defaultColor, light, overlay, shouldMultiplyAlpha);
+                    SpriteUtil.markSpriteActive(quad.getSprite());
+                }
+            }
+            return;
+        }
+
         for (int i = 0; i < quadCount; i++) {
             BakedQuad bakedQuad = quads.get(i);
-            if (bakedQuad.getVertices().length >= 32 && !isFacingAway(matrices, bakedQuad)) {
-                BakedQuadView quad = (BakedQuadView) bakedQuad;
-                int color = (colorProvider != null && quad.hasColor())
-                        ? ColorARGB.toABGR(colorProvider.getColor(itemStack, quad.getColorIndex()))
-                        : 0xFFFFFFFF;
+            if (bakedQuad.getVertices().length < 32) continue;
 
-                BakedModelEncoder.writeQuadVertices(writer, matrices, quad, color, light, overlay, BakedModelEncoder.shouldMultiplyAlpha());
+            if (!isFacingAway(matrices, bakedQuad)) {
+                BakedQuadView quad = (BakedQuadView) bakedQuad;
+                int color = quad.hasColor()
+                        ? ColorARGB.toABGR(colorProvider.getColor(itemStack, quad.getColorIndex()))
+                        : defaultColor;
+
+                BakedModelEncoder.writeQuadVertices(writer, matrices, quad, color, light, overlay, shouldMultiplyAlpha);
                 SpriteUtil.markSpriteActive(quad.getSprite());
             }
         }

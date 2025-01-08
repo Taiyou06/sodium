@@ -4,9 +4,10 @@ public class RadixSort extends AbstractSort {
     public static final int RADIX_SORT_THRESHOLD = 64;
 
     private static final int DIGIT_BITS = 8;
-    private static final int RADIX_KEY_BITS = Integer.BYTES * 8;
+    // Only sort the top 24 bits (3 passes instead of 4)
+    private static final int SIGNIFICANT_BITS = 24;
     private static final int BUCKET_COUNT = 1 << DIGIT_BITS;
-    private static final int DIGIT_COUNT = (RADIX_KEY_BITS + DIGIT_BITS - 1) / DIGIT_BITS;
+    private static final int DIGIT_COUNT = (SIGNIFICANT_BITS + DIGIT_BITS - 1) / DIGIT_BITS;
     private static final int DIGIT_MASK = (1 << DIGIT_BITS) - 1;
 
     public static int[] sort(int[] keys) {
@@ -73,7 +74,8 @@ public class RadixSort extends AbstractSort {
     }
 
     private static int extractDigit(int key, int digit) {
-        return ((key >>> (digit * DIGIT_BITS)) & DIGIT_MASK);
+        // Shift right by an extra 8 bits (ignore lowest byte of precision)
+        return ((key >>> ((digit * DIGIT_BITS) + (32 - SIGNIFICANT_BITS))) & DIGIT_MASK);
     }
 
     public static boolean useRadixSort(int length) {
