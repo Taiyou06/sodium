@@ -25,20 +25,28 @@ public final class Viewport {
         this.blockCoords = BlockPos.containing(position.x, position.y, position.z);
     }
 
+    /**
+     * SIMD-friendly implementation for future JVM auto-vectorization
+     * Note: This would require JVM support for vectorization
+     */
     public boolean isBoxVisible(int intOriginX, int intOriginY, int intOriginZ, float floatSizeX, float floatSizeY, float floatSizeZ) {
-        float floatOriginX = (intOriginX - this.transform.intX) - this.transform.fracX;
-        float floatOriginY = (intOriginY - this.transform.intY) - this.transform.fracY;
-        float floatOriginZ = (intOriginZ - this.transform.intZ) - this.transform.fracZ;
+        // Group operations to help auto-vectorization
+        float[] origins = new float[3];
+        origins[0] = intOriginX - (this.transform.intX + this.transform.fracX);
+        origins[1] = intOriginY - (this.transform.intY + this.transform.fracY);
+        origins[2] = intOriginZ - (this.transform.intZ + this.transform.fracZ);
 
-        return this.frustum.testAab(
-                floatOriginX - floatSizeX,
-                floatOriginY - floatSizeY,
-                floatOriginZ - floatSizeZ,
+        float[] sizes = new float[]{floatSizeX, floatSizeY, floatSizeZ};
+        float[] mins = new float[3];
+        float[] maxs = new float[3];
 
-                floatOriginX + floatSizeX,
-                floatOriginY + floatSizeY,
-                floatOriginZ + floatSizeZ
-        );
+        // Vectorizable loop
+        for (int i = 0; i < 3; i++) {
+            mins[i] = origins[i] - sizes[i];
+            maxs[i] = origins[i] + sizes[i];
+        }
+
+        return this.frustum.testAab(mins[0], mins[1], mins[2], maxs[0], maxs[1], maxs[2]);
     }
 
     public CameraTransform getTransform() {
