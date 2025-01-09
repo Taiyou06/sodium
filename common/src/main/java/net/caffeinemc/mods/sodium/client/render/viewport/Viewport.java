@@ -6,7 +6,7 @@ import net.minecraft.core.SectionPos;
 import org.joml.Vector3d;
 
 public final class Viewport {
-    private final Frustum frustum;
+    public final Frustum frustum;
     private final CameraTransform transform;
 
     private final SectionPos sectionCoords;

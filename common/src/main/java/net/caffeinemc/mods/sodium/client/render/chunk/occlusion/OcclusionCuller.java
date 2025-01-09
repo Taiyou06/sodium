@@ -1,6 +1,7 @@
 package net.caffeinemc.mods.sodium.client.render.chunk.occlusion;
 
 import it.unimi.dsi.fastutil.longs.Long2ReferenceMap;
+import net.caffeinemc.mods.sodium.client.SodiumClientMod;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
 import net.caffeinemc.mods.sodium.client.render.viewport.CameraTransform;
 import net.caffeinemc.mods.sodium.client.render.viewport.Viewport;
@@ -12,22 +13,31 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.level.Level;
 import org.jetbrains.annotations.NotNull;
 
+import java.util.ArrayList;
+import java.util.List;
+
 public class OcclusionCuller {
     private final Long2ReferenceMap<RenderSection> sections;
     private final Level level;
-
     private final DoubleBufferedQueue<RenderSection> queue = new DoubleBufferedQueue<>();
+
+    // Frame skip configuration
+    private int lastProcessedFrame = -1;
+
+    // Cache for visible sections
+    private final List<RenderSection> lastVisibleSections = new ArrayList<>();
+    private float lastSearchDistance;
 
     public OcclusionCuller(Long2ReferenceMap<RenderSection> sections, Level level) {
         this.sections = sections;
         this.level = level;
     }
 
-    public void findVisible(Visitor visitor,
-                            Viewport viewport,
-                            float searchDistance,
-                            boolean useOcclusionCulling,
-                            int frame)
+    private void processVisibility(Visitor visitor,
+                                   Viewport viewport,
+                                   float searchDistance,
+                                   boolean useOcclusionCulling,
+                                   int frame)
     {
         final var queues = this.queue;
         queues.reset();
@@ -39,6 +49,43 @@ public class OcclusionCuller {
         }
 
         this.addNearbySections(visitor, viewport, searchDistance, frame);
+    }
+
+    public void findVisible(Visitor visitor,
+                            Viewport viewport,
+                            float searchDistance,
+                            boolean useOcclusionCulling,
+                            int frame)
+    {
+        if (viewport == null) {
+            throw new IllegalArgumentException("Viewport cannot be null");
+        }
+
+        // Get frame interval from Sodium options
+        int frameInterval = SodiumClientMod.options().performance.chunkFrameInterval;
+        boolean shouldRecalculate = frame - lastProcessedFrame >= frameInterval;
+
+        if (shouldRecalculate) {
+            // Clear previous cache
+            lastVisibleSections.clear();
+
+            // Create capturing visitor to cache results
+            Visitor cachingVisitor = section -> {
+                visitor.visit(section);
+                lastVisibleSections.add(section);
+            };
+
+            this.lastProcessedFrame = frame;
+            processVisibility(cachingVisitor, viewport, searchDistance, useOcclusionCulling, frame);
+        } else {
+            // Fast path: just revisit previously visible sections with updated frame number
+            for (RenderSection section : lastVisibleSections) {
+                if (!section.isDisposed()) {
+                    section.setLastVisibleFrame(frame);
+                    visitor.visit(section);
+                }
+            }
+        }
     }
 
     private static void processQueue(Visitor visitor,
@@ -63,22 +110,12 @@ public class OcclusionCuller {
             {
                 if (useOcclusionCulling) {
                     var sectionVisibilityData = section.getVisibilityData();
-
-                    // occlude paths through the section if it's being viewed at an angle where
-                    // the other side can't possibly be seen
                     sectionVisibilityData &= getAngleVisibilityMask(viewport, section);
-
-                    // When using occlusion culling, we can only traverse into neighbors for which there is a path of
-                    // visibility through this chunk. This is determined by taking all the incoming paths to this chunk and
-                    // creating a union of the outgoing paths from those.
                     connections = VisibilityEncoding.getConnections(sectionVisibilityData, section.getIncomingDirections());
                 } else {
-                    // Not using any occlusion culling, so traversing in any direction is legal.
                     connections = GraphDirectionSet.ALL;
                 }
 
-                // We can only traverse *outwards* from the center of the graph search, so mask off any invalid
-                // directions.
                 connections &= getOutwardDirections(viewport.getChunkCoord(), section);
             }
 
@@ -153,17 +190,21 @@ public class OcclusionCuller {
         }
     }
 
+    // If you want to get more aggressive with bit operations:
     private static void visitNode(final WriteQueue<RenderSection> queue, @NotNull RenderSection render, int incoming, int frame) {
-        if (render.getLastVisibleFrame() != frame) {
-            // This is the first time we are visiting this section during the given frame, so we must
-            // reset the state.
-            render.setLastVisibleFrame(frame);
-            render.setIncomingDirections(GraphDirectionSet.NONE);
-
+        // Get frame difference
+        int frameDiff = frame - render.getLastVisibleFrame();
+        // If frameDiff is not 0, it's a new frame
+        boolean isNewFrame = frameDiff != 0;
+        // Use the sign bit to create a mask (-1 for true, 0 for false)
+        int mask = frameDiff >> 31 | (~frameDiff >> 31);
+        // Set directions using mask
+        render.incomingDirections = (isNewFrame ? 0 : render.incomingDirections) | incoming;
+        render.lastVisibleFrame = frame;
+        // Conditional enqueue using mask
+        if (isNewFrame) {
             queue.enqueue(render);
         }
-
-        render.addIncomingDirections(incoming);
     }
 
     private static int getOutwardDirections(SectionPos origin, RenderSection section) {

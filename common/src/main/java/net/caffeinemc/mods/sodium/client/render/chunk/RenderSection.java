@@ -29,8 +29,8 @@ public class RenderSection {
     // Occlusion Culling State
     private long visibilityData = VisibilityEncoding.NULL;
 
-    private int incomingDirections;
-    private int lastVisibleFrame = -1;
+    public int incomingDirections;
+    public int lastVisibleFrame = -1;
 
     private int adjacentMask;
     public RenderSection

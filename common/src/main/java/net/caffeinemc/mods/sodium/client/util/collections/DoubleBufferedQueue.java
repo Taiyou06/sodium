@@ -3,33 +3,32 @@ package net.caffeinemc.mods.sodium.client.util.collections;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.Arrays;
-
 public final class DoubleBufferedQueue<E> {
     private QueueImpl<E> read, write;
 
     public DoubleBufferedQueue() {
-        this.read = new QueueImpl<>();
-        this.write = new QueueImpl<>();
+        // Start with smaller initial capacity and let it grow if needed
+        this.read = new QueueImpl<>(64);
+        this.write = new QueueImpl<>(64);
     }
 
     public boolean flip() {
-        if (this.write.size() == 0) {
+        if (this.write.isEmpty()) {
             return false;
         }
 
-        var tmp = this.read;
+        QueueImpl<E> tmp = this.read;
         this.read = this.write;
         this.write = tmp;
 
-        this.write.clear();
+        this.write.reset();
 
         return true;
     }
 
     public void reset() {
-        this.read.clear();
-        this.write.clear();
+        this.read.reset();
+        this.write.reset();
     }
 
     public ReadQueue<E> read() {
@@ -42,72 +41,100 @@ public final class DoubleBufferedQueue<E> {
 
     private static final class QueueImpl<E> implements ReadQueue<E>, WriteQueue<E> {
         private E[] elements;
-        private int readIndex, writeIndex;
-
-        QueueImpl() {
-            this(256);
-        }
+        private int readIndex;
+        private int writeIndex;
+        private int mask;  // For fast modulo operations
 
         @SuppressWarnings("unchecked")
         QueueImpl(int capacity) {
-            this.elements = (E[]) new Object[capacity];
+            // Round up to next power of 2 for fast modulo
+            int size = 1 << (32 - Integer.numberOfLeadingZeros(capacity - 1));
+            this.elements = (E[]) new Object[size];
+            this.mask = size - 1;
         }
 
         @Override
         public void ensureCapacity(int numElements) {
-            int len = this.writeIndex + numElements;
-
-            if (len > this.elements.length) {
-                this.grow(len);
+            int required = this.writeIndex + numElements;
+            if (required > elements.length) {
+                resize(required);
             }
         }
 
         @Override
         public @Nullable E dequeue() {
-            if (this.readIndex == this.writeIndex) {
+            if (readIndex == writeIndex) {
                 return null;
             }
 
-            return this.elements[this.readIndex++];
+            E element = elements[readIndex & mask];
+            elements[readIndex & mask] = null; // Help GC
+            readIndex++;
+            return element;
         }
 
         @Override
         public void enqueue(@NotNull E e) {
-            if (this.writeIndex >= this.elements.length) {
-                this.resize(this.writeIndex + 1);
+            if (writeIndex - readIndex >= elements.length) {
+                resize(elements.length << 1);
+            }
+            elements[writeIndex & mask] = e;
+            writeIndex++;
+        }
+
+        public boolean isEmpty() {
+            return writeIndex == readIndex;
+        }
+
+        public void reset() {
+            if (writeIndex > readIndex) {
+                // Only clear used portion
+                int start = readIndex & mask;
+                int end = writeIndex & mask;
+                if (start < end) {
+                    // Continuous region
+                    clearRange(start, end);
+                } else {
+                    // Wrapped around
+                    clearRange(start, elements.length);
+                    clearRange(0, end);
+                }
+            }
+            readIndex = writeIndex = 0;
+        }
+
+        private void clearRange(int from, int to) {
+            while (from < to) {
+                elements[from++] = null;
+            }
+        }
+
+        @SuppressWarnings("unchecked")
+        private void resize(int minCapacity) {
+            // Round up to next power of 2
+            int newSize = 1 << (32 - Integer.numberOfLeadingZeros(minCapacity - 1));
+            E[] newElements = (E[]) new Object[newSize];
+
+            // Copy elements, handling wrap-around
+            int size = writeIndex - readIndex;
+            if (size > 0) {
+                int start = readIndex & mask;
+                int end = writeIndex & mask;
+                if (start < end) {
+                    // Continuous region
+                    System.arraycopy(elements, start, newElements, 0, size);
+                } else {
+                    // Wrapped around
+                    int firstPart = elements.length - start;
+                    System.arraycopy(elements, start, newElements, 0, firstPart);
+                    System.arraycopy(elements, 0, newElements, firstPart, end);
+                }
             }
 
-            this.elements[this.writeIndex++] = e;
-        }
-
-
-        public void clear() {
-            if (this.writeIndex != 0) {
-                Arrays.fill(this.elements, 0, this.writeIndex, null);
-            }
-
-            this.readIndex = 0;
-            this.writeIndex = 0;
-        }
-
-        public int size() {
-            return this.writeIndex - this.readIndex;
-        }
-
-        private void grow(int minimumSize) {
-            this.resize(getNextSize(minimumSize, this.elements.length));
-        }
-
-        private void resize(int length) {
-            @SuppressWarnings("unchecked")
-            E[] elements = (E[]) new Object[length];
-            System.arraycopy(this.elements, 0, elements, 0, this.writeIndex);
-
-            this.elements = elements;
-        }
-
-        private static int getNextSize(int minimumSize, int currentSize) {
-            return Math.max(minimumSize, currentSize << 1);
+            elements = newElements;
+            mask = newSize - 1;
+            writeIndex = size;
+            readIndex = 0;
         }
     }
 }
