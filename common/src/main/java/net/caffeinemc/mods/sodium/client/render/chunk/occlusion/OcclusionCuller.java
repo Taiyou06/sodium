@@ -61,6 +61,12 @@ public class OcclusionCuller {
             throw new IllegalArgumentException("Viewport cannot be null");
         }
 
+        // Check if shaders are active - if so, disable frame skipping
+        if (!IrisCheck.checkIrisShouldDisable()) {
+            processVisibility(visitor, viewport, searchDistance, useOcclusionCulling, frame);
+            return;
+        }
+
         // Get frame interval from Sodium options
         int frameInterval = SodiumClientMod.options().performance.chunkFrameInterval;
         boolean shouldRecalculate = frame - lastProcessedFrame >= frameInterval;

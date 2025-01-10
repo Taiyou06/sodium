@@ -66,6 +66,7 @@ dependencies {
     addDependentFabricModule("fabric-rendering-data-attachment-v1")
 
     modCompileOnly("net.fabricmc.fabric-api:fabric-renderer-api-v1:3.2.9+1172e897d7")
+    modCompileOnly("maven.modrinth:iris:1.8.1+1.21.1-fabric")
 
     // We need to be careful during pre-launch that we don't touch any Minecraft classes, since other mods
     // will not yet have an opportunity to apply transformations.
