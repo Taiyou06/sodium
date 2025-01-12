@@ -14,7 +14,6 @@ import net.minecraft.world.level.Level;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 public class OcclusionCuller {
@@ -22,63 +21,70 @@ public class OcclusionCuller {
     private final Level level;
     private final DoubleBufferedQueue<RenderSection> queue = new DoubleBufferedQueue<>();
 
+    // Frame skip configuration
     private int lastProcessedFrame = -1;
+
+    // Cache for visible sections
     private final List<RenderSection> lastVisibleSections = new ArrayList<>();
-
-    private static final float CHUNK_SECTION_RADIUS = 8.0f;
-    private static final float CHUNK_SECTION_SIZE = CHUNK_SECTION_RADIUS + 1.0f + 0.125f;
-
-    private static class LayerTraversalState {
-        private final float[] quadrantImportance = new float[4];
-        private final boolean[] quadrantActive = new boolean[4];
-
-        public LayerTraversalState() {
-            Arrays.fill(quadrantActive, true);
-        }
-
-        public void deactivateQuadrant(int quadrant) {
-            if (quadrantActive[quadrant]) {
-                quadrantActive[quadrant] = false;
-            }
-        }
-
-        public boolean isQuadrantActive(int quadrant) {
-            return quadrantActive[quadrant];
-        }
-
-        public float getQuadrantImportance(int quadrant) {
-            return quadrantImportance[quadrant];
-        }
-    }
+    private float lastSearchDistance;
 
     public OcclusionCuller(Long2ReferenceMap<RenderSection> sections, Level level) {
         this.sections = sections;
         this.level = level;
     }
 
-    public void findVisible(Visitor visitor, Viewport viewport, float searchDistance,
-                            boolean useOcclusionCulling, int frame) {
+    private void processVisibility(Visitor visitor,
+                                   Viewport viewport,
+                                   float searchDistance,
+                                   boolean useOcclusionCulling,
+                                   int frame)
+    {
+        final var queues = this.queue;
+        queues.reset();
+
+        this.init(visitor, queues.write(), viewport, searchDistance, useOcclusionCulling, frame);
+
+        while (queues.flip()) {
+            processQueue(visitor, viewport, searchDistance, useOcclusionCulling, frame, queues.read(), queues.write());
+        }
+
+        this.addNearbySections(visitor, viewport, searchDistance, frame);
+    }
+
+    public void findVisible(Visitor visitor,
+                            Viewport viewport,
+                            float searchDistance,
+                            boolean useOcclusionCulling,
+                            int frame)
+    {
         if (viewport == null) {
             throw new IllegalArgumentException("Viewport cannot be null");
         }
 
+        // Check if shaders are active - if so, disable frame skipping
         if (!IrisCheck.checkIrisShouldDisable()) {
             processVisibility(visitor, viewport, searchDistance, useOcclusionCulling, frame);
             return;
         }
 
+        // Get frame interval from Sodium options
         int frameInterval = SodiumClientMod.options().performance.chunkFrameInterval;
         boolean shouldRecalculate = frame - lastProcessedFrame >= frameInterval;
 
         if (shouldRecalculate) {
+            // Clear previous cache
             lastVisibleSections.clear();
+
+            // Create capturing visitor to cache results
             Visitor cachingVisitor = section -> {
                 visitor.visit(section);
                 lastVisibleSections.add(section);
             };
+
             this.lastProcessedFrame = frame;
             processVisibility(cachingVisitor, viewport, searchDistance, useOcclusionCulling, frame);
         } else {
+            // Fast path: just revisit previously visible sections with updated frame number
             for (RenderSection section : lastVisibleSections) {
                 if (!section.isDisposed()) {
                     section.setLastVisibleFrame(frame);
@@ -88,148 +94,14 @@ public class OcclusionCuller {
         }
     }
 
-    private void processVisibility(Visitor visitor, Viewport viewport, float searchDistance,
-                                   boolean useOcclusionCulling, int frame) {
-        final var queues = this.queue;
-        queues.reset();
-
-        this.init(visitor, queues.write(), viewport, searchDistance, useOcclusionCulling, frame);
-
-        while (queues.flip()) {
-            processQueue(visitor, viewport, searchDistance, useOcclusionCulling, frame,
-                    queues.read(), queues.write());
-        }
-
-        this.addNearbySections(visitor, viewport, searchDistance, frame);
-    }
-
-    private void addNearbySections(Visitor visitor, Viewport viewport, float searchDistance, int frame) {
-        var origin = viewport.getChunkCoord();
-        var transform = viewport.getTransform();
-
-        // Calculate normalized view direction vector
-        double yaw = Math.toRadians(transform.intY);
-        double pitch = Math.toRadians(transform.intX);
-        float viewX = (float)(Math.cos(yaw) * Math.cos(pitch));
-        float viewY = (float)(Math.sin(pitch));
-        float viewZ = (float)(Math.sin(yaw) * Math.cos(pitch));
-
-        // Use ArrayList for initial gathering
-        var preFilteredSections = new ArrayList<SectionCandidate>(27);
-        int sectionsFound = 0;
-        float maxDistanceSq = searchDistance * searchDistance;
-
-        int searchRadius = 1;
-        for (var dx = -searchRadius; dx <= searchRadius; dx++) {
-            for (var dy = -searchRadius; dy <= searchRadius; dy++) {
-                for (var dz = -searchRadius; dz <= searchRadius; dz++) {
-                    // Skip center section
-                    if (dx == 0 && dy == 0 && dz == 0) {
-                        continue;
-                    }
-
-                    // Quick distance check using manhattan distance
-                    if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) > 3) {
-                        continue;
-                    }
-
-                    var section = this.getRenderSection(
-                            origin.getX() + dx,
-                            origin.getY() + dy,
-                            origin.getZ() + dz
-                    );
-
-                    if (section == null || section.getLastVisibleFrame() == frame) {
-                        continue;
-                    }
-
-                    // Calculate direction and distance to section center
-                    float dirX = (float) (section.getCenterX() - transform.x);
-                    float dirY = (float) (section.getCenterY() - transform.y);
-                    float dirZ = (float) (section.getCenterZ() - transform.z);
-
-                    float distanceSq = dirX * dirX + dirY * dirY + dirZ * dirZ;
-
-                    // Early distance culling
-                    if (distanceSq > maxDistanceSq) {
-                        continue;
-                    }
-
-                    float distance = (float) Math.sqrt(distanceSq);
-
-                    // Normalize direction
-                    if (distance > 0) {
-                        dirX /= distance;
-                        dirY /= distance;
-                        dirZ /= distance;
-                    }
-
-                    // Calculate alignment with view direction
-                    float alignment = dirX * viewX + dirY * viewY + dirZ * viewZ;
-
-                    // More aggressive culling for distant sections
-                    float cullAngle = -0.5f + (distance / searchDistance) * 0.3f;
-                    if (alignment < cullAngle) {
-                        continue;
-                    }
-
-                    // Calculate priority based on alignment and distance
-                    float alignmentFactor = (alignment + 1.0f) * 0.5f;
-                    float distanceFactor = 1.0f - (distance / searchDistance);
-                    float priority = alignmentFactor * distanceFactor;
-
-                    preFilteredSections.add(new SectionCandidate(section, priority, distance));
-                    sectionsFound++;
-                }
-            }
-        }
-
-        // Process found sections
-        if (sectionsFound > 0) {
-            preFilteredSections.sort(null);
-            int maxToProcess = Math.min(8, sectionsFound);
-
-            for (int i = 0; i < maxToProcess; i++) {
-                var candidate = preFilteredSections.get(i);
-                var section = candidate.section;
-
-                // Final visibility check
-                if (isWithinFrustum(viewport, section)) {
-                    section.setLastVisibleFrame(frame);
-                    visitor.visit(section);
-                }
-            }
-        }
-    }
-
-    private record SectionCandidate(RenderSection section, float priority, float distance)
-            implements Comparable<SectionCandidate> {
-        @Override
-        public int compareTo(SectionCandidate other) {
-            // First compare by priority bands
-            int thisBand = getPriorityBand(this.priority);
-            int otherBand = getPriorityBand(other.priority);
-
-            if (thisBand != otherBand) {
-                return otherBand - thisBand;
-            }
-
-            // Within same band, closer sections are higher priority
-            return Float.compare(this.distance, other.distance);
-        }
-
-        private static int getPriorityBand(float priority) {
-            if (priority > 0.7f) return 2; // High priority
-            if (priority > 0.3f) return 1; // Medium priority
-            return 0; // Low priority
-        }
-    }
-
-
-    private static void processQueue(Visitor visitor, Viewport viewport, float searchDistance,
-                                     boolean useOcclusionCulling, int frame,
+    private static void processQueue(Visitor visitor,
+                                     Viewport viewport,
+                                     float searchDistance,
+                                     boolean useOcclusionCulling,
+                                     int frame,
                                      ReadQueue<RenderSection> readQueue,
-                                     WriteQueue<RenderSection> writeQueue) {
+                                     WriteQueue<RenderSection> writeQueue)
+    {
         RenderSection section;
 
         while ((section = readQueue.dequeue()) != null) {
@@ -241,258 +113,62 @@ public class OcclusionCuller {
 
             int connections;
 
-            if (useOcclusionCulling) {
-                var sectionVisibilityData = section.getVisibilityData();
-                sectionVisibilityData &= getAngleVisibilityMask(viewport, section);
-                connections = VisibilityEncoding.getConnections(sectionVisibilityData,
-                        section.getIncomingDirections());
-            } else {
-                connections = GraphDirectionSet.ALL;
+            {
+                if (useOcclusionCulling) {
+                    var sectionVisibilityData = section.getVisibilityData();
+                    sectionVisibilityData &= getAngleVisibilityMask(viewport, section);
+                    connections = VisibilityEncoding.getConnections(sectionVisibilityData, section.getIncomingDirections());
+                } else {
+                    connections = GraphDirectionSet.ALL;
+                }
+
+                connections &= getOutwardDirections(viewport.getChunkCoord(), section);
             }
 
-            connections &= getOutwardDirections(viewport.getChunkCoord(), section);
             visitNeighbors(writeQueue, section, connections, frame);
         }
     }
 
-    private void init(Visitor visitor, WriteQueue<RenderSection> queue, Viewport viewport,
-                      float searchDistance, boolean useOcclusionCulling, int frame) {
-        var origin = viewport.getChunkCoord();
+    private static final long UP_DOWN_OCCLUDED = (1L << VisibilityEncoding.bit(GraphDirection.DOWN, GraphDirection.UP)) | (1L << VisibilityEncoding.bit(GraphDirection.UP, GraphDirection.DOWN));
+    private static final long NORTH_SOUTH_OCCLUDED = (1L << VisibilityEncoding.bit(GraphDirection.NORTH, GraphDirection.SOUTH)) | (1L << VisibilityEncoding.bit(GraphDirection.SOUTH, GraphDirection.NORTH));
+    private static final long WEST_EAST_OCCLUDED = (1L << VisibilityEncoding.bit(GraphDirection.WEST, GraphDirection.EAST)) | (1L << VisibilityEncoding.bit(GraphDirection.EAST, GraphDirection.WEST));
 
-        if (origin.getY() < this.level.getMinSection()) {
-            this.initOutsideWorldHeight(queue, viewport, searchDistance, frame,
-                    this.level.getMinSection(), GraphDirection.DOWN);
-        } else if (origin.getY() >= this.level.getMaxSection()) {
-            this.initOutsideWorldHeight(queue, viewport, searchDistance, frame,
-                    this.level.getMaxSection() - 1, GraphDirection.UP);
-        } else {
-            this.initWithinWorld(visitor, queue, viewport, useOcclusionCulling, frame);
-        }
-    }
-
-    private void initOutsideWorldHeight(WriteQueue<RenderSection> queue, Viewport viewport,
-                                        float searchDistance, int frame, int height, int direction) {
-        var origin = viewport.getChunkCoord();
-        var radius = Mth.floor(searchDistance / 16.0f);
+    private static long getAngleVisibilityMask(Viewport viewport, RenderSection section) {
         var transform = viewport.getTransform();
+        var dx = Math.abs(transform.x - section.getCenterX());
+        var dy = Math.abs(transform.y - section.getCenterY());
+        var dz = Math.abs(transform.z - section.getCenterZ());
 
-        float yaw = (float) Math.toRadians(transform.intY);
-        float pitch = (float) Math.toRadians(transform.intX);
-        float viewX = (float) (Math.cos(yaw) * Math.cos(pitch));
-        float viewZ = (float) (Math.sin(yaw) * Math.cos(pitch));
-
-        // Process origin section
-        tryVisitNode(queue, origin.getX(), height, origin.getZ(), direction, frame, viewport);
-
-        // Process layers using adaptive quadrants
-        for (int layer = 1; layer <= radius; layer++) {
-            float layerDistanceSq = layer * layer * 256.0f;
-            if (layerDistanceSq > searchDistance * searchDistance) {
-                break;
-            }
-
-            // Create quadrant hierarchy for this layer
-            AdaptiveQuadrant rootQuadrant = new AdaptiveQuadrant(-layer, layer, -layer, layer, 0);
-            subdivideQuadrantsAdaptively(rootQuadrant, viewX, viewZ, searchDistance, 3);
-
-            // Process all quadrants in the hierarchy
-            processQuadrantHierarchy(rootQuadrant, queue, viewport, origin, height, direction, frame,
-                    viewX, viewZ, searchDistance);
+        var angleOcclusionMask = 0L;
+        if (dx > dy || dz > dy) {
+            angleOcclusionMask |= UP_DOWN_OCCLUDED;
         }
+        if (dx > dz || dy > dz) {
+            angleOcclusionMask |= NORTH_SOUTH_OCCLUDED;
+        }
+        if (dy > dx || dz > dx) {
+            angleOcclusionMask |= WEST_EAST_OCCLUDED;
+        }
+
+        return ~angleOcclusionMask;
     }
 
-    private void subdivideQuadrantsAdaptively(AdaptiveQuadrant quadrant, float viewX, float viewZ,
-                                              float maxDistance, int maxLevel) {
-        if (quadrant.level >= maxLevel) return;
-
-        float importance = quadrant.getImportance(viewX, viewZ, maxDistance);
-        float subdivisionThreshold = 0.5f / (quadrant.level + 1);
-
-        if (importance > subdivisionThreshold) {
-            quadrant.subdivide();
-            for (AdaptiveQuadrant sub : quadrant.getSubQuadrants()) {
-                subdivideQuadrantsAdaptively(sub, viewX, viewZ, maxDistance, maxLevel);
-            }
-        }
+    private static boolean isSectionVisible(RenderSection section, Viewport viewport, float maxDistance) {
+        return isWithinRenderDistance(viewport.getTransform(), section, maxDistance) && isWithinFrustum(viewport, section);
     }
 
-    private void processQuadrantHierarchy(AdaptiveQuadrant quadrant,
-                                          WriteQueue<RenderSection> queue,
-                                          Viewport viewport,
-                                          SectionPos origin,
-                                          int height,
-                                          int direction,
-                                          int frame,
-                                          float viewX,
-                                          float viewZ,
-                                          float searchDistance) {
-        // Process subdivided quadrants recursively
-        if (quadrant.isSubdivided()) {
-            for (AdaptiveQuadrant sub : quadrant.getSubQuadrants()) {
-                processQuadrantHierarchy(sub, queue, viewport, origin, height, direction, frame,
-                        viewX, viewZ, searchDistance);
-            }
-            return;
-        }
-
-        // Calculate appropriate stride for this quadrant
-        float importance = quadrant.getImportance(viewX, viewZ, searchDistance);
-        int stride = calculateAdaptiveStride(importance, quadrant.level);
-
-        // Skip processing if quadrant importance is too low
-        if (importance < 0.05f) return;
-
-        // Quick frustum check for the entire quadrant
-        if (!isQuadrantPotentiallyVisible(viewport, origin, height, quadrant.minX, quadrant.maxX,
-                quadrant.minZ, quadrant.maxZ)) {
-            return;
-        }
-
-        // Process all sections in the quadrant with calculated stride
-        for (int x = quadrant.minX; x < quadrant.maxX; x += stride) {
-            for (int z = quadrant.minZ; z < quadrant.maxZ; z += stride) {
-                RenderSection section = getRenderSection(
-                        origin.getX() + x,
-                        height,
-                        origin.getZ() + z
-                );
-
-                if (section != null && isWithinFrustum(viewport, section)) {
-                    visitNode(queue, section, GraphDirectionSet.of(direction), frame);
-                }
-            }
-        }
-    }
-
-    private int calculateAdaptiveStride(float importance, int level) {
-        int baseStride = 1 << level;
-
-        if (importance < 0.3f) return baseStride * 4;
-        if (importance < 0.6f) return baseStride * 2;
-        return baseStride;
-    }
-
-    private void processQuadrantsInImportanceOrder(WriteQueue<RenderSection> queue,
-                                                   Viewport viewport,
-                                                   SectionPos origin,
-                                                   int height,
-                                                   int layer,
-                                                   int direction,
-                                                   int frame,
-                                                   LayerTraversalState state,
-                                                   int baseStride) {
-        Integer[] quadrants = {0, 1, 2, 3};
-        Arrays.sort(quadrants, (a, b) -> Float.compare(
-                state.getQuadrantImportance(b),
-                state.getQuadrantImportance(a)
-        ));
-
-        boolean foundVisible = false;
-
-        for (int quadrant : quadrants) {
-            if (!state.isQuadrantActive(quadrant)) {
-                continue;
-            }
-
-            float importance = state.getQuadrantImportance(quadrant);
-            int adaptiveStride = calculateAdaptiveStride(baseStride, importance);
-
-            if (processQuadrantWithImportance(queue, viewport, origin, height, layer,
-                    quadrant, direction, frame, adaptiveStride, importance)) {
-                foundVisible = true;
-            } else {
-                state.deactivateQuadrant(quadrant);
-            }
-        }
-
-        if (!foundVisible) {
-            for (int q = 0; q < 4; q++) {
-                state.deactivateQuadrant(q);
-            }
-        }
-    }
-
-    private static int calculateAdaptiveStride(int baseStride, float quadrantImportance) {
-        if (quadrantImportance < 0.3f) return baseStride * 2;
-        if (quadrantImportance < 0.6f) return baseStride + 1;
-        return baseStride;
-    }
-
-    private boolean processQuadrantWithImportance(WriteQueue<RenderSection> queue,
-                                                  Viewport viewport,
-                                                  SectionPos origin,
-                                                  int height,
-                                                  int layer,
-                                                  int quadrant,
-                                                  int direction,
-                                                  int frame,
-                                                  int stride,
-                                                  float importance) {
-        int[] dirs = getQuadrantDirections(quadrant);
-        int xDir = dirs[0];
-        int zDir = dirs[1];
-
-        int startX = xDir * layer;
-        int endX = 0;
-        int startZ = 0;
-        int endZ = zDir * layer;
-
-        if (!isQuadrantPotentiallyVisible(viewport, origin, height, startX, endX, startZ, endZ) ||
-                importance < 0.1f) {
-            return false;
-        }
-
-        boolean foundVisible = false;
-        float cullAngle = -0.3f + (layer * 16.0f / (xDir * 16.0f)) * 0.4f;
-
-        for (int x = startX; x != endX; x -= (xDir * stride)) {
-            for (int z = startZ; z != endZ; z += (zDir * stride)) {
-                RenderSection section = getRenderSection(
-                        origin.getX() + x,
-                        height,
-                        origin.getZ() + z
-                );
-
-                if (section != null &&
-                        isSectionImportant(section, viewport, cullAngle) &&
-                        isWithinFrustum(viewport, section)) {
-                    visitNode(queue, section, GraphDirectionSet.of(direction), frame);
-                    foundVisible = true;
-                }
-            }
-        }
-
-        return foundVisible;
-    }
-
-    private boolean isSectionImportant(RenderSection section, Viewport viewport, float cullAngle) {
-        var transform = viewport.getTransform();
-
-        float dx = (float) (section.getCenterX() - transform.x);
-        float dy = (float) (section.getCenterY() - transform.y);
-        float dz = (float) (section.getCenterZ() - transform.z);
-
-        float dist = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (dist == 0) return true;
-
-        dx /= dist;
-        dy /= dist;
-        dz /= dist;
-
-        float yaw = (float) Math.toRadians(transform.intY);
-        float pitch = (float) Math.toRadians(transform.intX);
-        float viewX = (float) (Math.cos(yaw) * Math.cos(pitch));
-        float viewY = (float) (Math.sin(pitch));
-        float viewZ = (float) (Math.sin(yaw) * Math.cos(pitch));
-
-        float alignment = dx * viewX + dy * viewY + dz * viewZ;
-        return alignment > cullAngle;
-    }
-
-    private static void visitNeighbors(final WriteQueue<RenderSection> queue,
-                                       RenderSection section, int outgoing, int frame) {
+    private static void visitNeighbors(final WriteQueue<RenderSection> queue, RenderSection section, int outgoing, int frame) {
+        // Only traverse into neighbors which are actually present.
+        // This avoids a null-check on each invocation to enqueue, and since the compiler will see that a null
+        // is never encountered (after profiling), it will optimize it away.
         outgoing &= section.getAdjacentMask();
-        if (outgoing == GraphDirectionSet.NONE) return;
+
+        // Check if there are any valid connections left, and if not, early-exit.
+        if (outgoing == GraphDirectionSet.NONE) {
+            return;
+        }
+
+        // This helps the compiler move the checks for some invariants upwards.
         queue.ensureCapacity(6);
 
         if (GraphDirectionSet.contains(outgoing, GraphDirection.DOWN)) {
@@ -520,140 +196,21 @@ public class OcclusionCuller {
         }
     }
 
-    private static void visitNode(final WriteQueue<RenderSection> queue,
-                                  @NotNull RenderSection render, int incoming, int frame) {
+    // If you want to get more aggressive with bit operations:
+    private static void visitNode(final WriteQueue<RenderSection> queue, @NotNull RenderSection render, int incoming, int frame) {
+        // Get frame difference
         int frameDiff = frame - render.getLastVisibleFrame();
+        // If frameDiff is not 0, it's a new frame
         boolean isNewFrame = frameDiff != 0;
+        // Use the sign bit to create a mask (-1 for true, 0 for false)
+        int mask = frameDiff >> 31 | (~frameDiff >> 31);
+        // Set directions using mask
         render.incomingDirections = (isNewFrame ? 0 : render.incomingDirections) | incoming;
         render.lastVisibleFrame = frame;
+        // Conditional enqueue using mask
         if (isNewFrame) {
             queue.enqueue(render);
         }
-    }
-
-    private void initWithinWorld(Visitor visitor, WriteQueue<RenderSection> queue,
-                                 Viewport viewport, boolean useOcclusionCulling, int frame) {
-        var origin = viewport.getChunkCoord();
-        var section = this.getRenderSection(origin.getX(), origin.getY(), origin.getZ());
-
-        if (section == null) {
-            return;
-        }
-
-        section.setLastVisibleFrame(frame);
-        section.setIncomingDirections(GraphDirectionSet.NONE);
-
-        visitor.visit(section);
-
-        int outgoing = useOcclusionCulling ?
-                VisibilityEncoding.getConnections(section.getVisibilityData()) :
-                GraphDirectionSet.ALL;
-
-        visitNeighbors(queue, section, outgoing, frame);
-    }
-
-    private boolean isQuadrantPotentiallyVisible(Viewport viewport,
-                                                 SectionPos origin,
-                                                 int height,
-                                                 int startX,
-                                                 int endX,
-                                                 int startZ,
-                                                 int endZ) {
-        int minX = Math.min(startX, endX) + origin.getX();
-        int maxX = Math.max(startX, endX) + origin.getX();
-        int minZ = Math.min(startZ, endZ) + origin.getZ();
-        int maxZ = Math.max(startZ, endZ) + origin.getZ();
-
-        float size = CHUNK_SECTION_SIZE * 1.5f;
-        float centerX = (minX + maxX) * 8.0f;
-        float centerZ = (minZ + maxZ) * 8.0f;
-        float sizeX = (maxX - minX + 1) * 8.0f + size;
-        float sizeZ = (maxZ - minZ + 1) * 8.0f + size;
-
-        return viewport.isBoxVisible((int) centerX, (int) (height * 16.0f), (int) centerZ,
-                sizeX, size, sizeZ);
-    }
-
-    private static final long UP_DOWN_OCCLUDED = (1L << VisibilityEncoding.bit(GraphDirection.DOWN, GraphDirection.UP)) |
-            (1L << VisibilityEncoding.bit(GraphDirection.UP, GraphDirection.DOWN));
-    private static final long NORTH_SOUTH_OCCLUDED = (1L << VisibilityEncoding.bit(GraphDirection.NORTH, GraphDirection.SOUTH)) |
-            (1L << VisibilityEncoding.bit(GraphDirection.SOUTH, GraphDirection.NORTH));
-    private static final long WEST_EAST_OCCLUDED = (1L << VisibilityEncoding.bit(GraphDirection.WEST, GraphDirection.EAST)) |
-            (1L << VisibilityEncoding.bit(GraphDirection.EAST, GraphDirection.WEST));
-
-    private static long getAngleVisibilityMask(Viewport viewport, RenderSection section) {
-        var transform = viewport.getTransform();
-        var dx = Math.abs(transform.x - section.getCenterX());
-        var dy = Math.abs(transform.y - section.getCenterY());
-        var dz = Math.abs(transform.z - section.getCenterZ());
-
-        var angleOcclusionMask = 0L;
-        if (dx > dy || dz > dy) {
-            angleOcclusionMask |= UP_DOWN_OCCLUDED;
-        }
-        if (dx > dz || dy > dz) {
-            angleOcclusionMask |= NORTH_SOUTH_OCCLUDED;
-        }
-        if (dy > dx || dz > dx) {
-            angleOcclusionMask |= WEST_EAST_OCCLUDED;
-        }
-
-        return ~angleOcclusionMask;
-    }
-
-    private static boolean isSectionVisible(RenderSection section, Viewport viewport, float maxDistance) {
-        return isWithinRenderDistance(viewport.getTransform(), section, maxDistance) &&
-                isWithinFrustum(viewport, section);
-    }
-
-    private static boolean isWithinRenderDistance(CameraTransform camera, RenderSection section, float maxDistance) {
-        int ox = section.getOriginX() - camera.intX;
-        int oy = section.getOriginY() - camera.intY;
-        int oz = section.getOriginZ() - camera.intZ;
-
-        float dx = nearestToZero(ox, ox + 16) - camera.fracX;
-        float dy = nearestToZero(oy, oy + 16) - camera.fracY;
-        float dz = nearestToZero(oz, oz + 16) - camera.fracZ;
-
-        return (((dx * dx) + (dz * dz)) < (maxDistance * maxDistance)) &&
-                (Math.abs(dy) < maxDistance);
-    }
-
-    private static int nearestToZero(int min, int max) {
-        int clamped = 0;
-        if (min > 0) { clamped = min; }
-        if (max < 0) { clamped = max; }
-        return clamped;
-    }
-
-    private int[] getQuadrantDirections(int quadrant) {
-        switch (quadrant) {
-            case 0: return new int[]{ 1, -1 }; // NE
-            case 1: return new int[]{ 1,  1 }; // SE
-            case 2: return new int[]{ -1, 1 }; // SW
-            case 3: return new int[]{ -1,-1 }; // NW
-            default: throw new IllegalArgumentException("Invalid quadrant: " + quadrant);
-        }
-    }
-
-    private void tryVisitNode(WriteQueue<RenderSection> queue, int x, int y, int z,
-                              int direction, int frame, Viewport viewport) {
-        RenderSection section = this.getRenderSection(x, y, z);
-
-        if (section == null || !isWithinFrustum(viewport, section)) {
-            return;
-        }
-
-        visitNode(queue, section, GraphDirectionSet.of(direction), frame);
-    }
-
-    private RenderSection getRenderSection(int x, int y, int z) {
-        return this.sections.get(SectionPos.asLong(x, y, z));
-    }
-
-    public static boolean isWithinFrustum(Viewport viewport, RenderSection section) {
-        return viewport.isBoxVisible(section.getCenterX(), section.getCenterY(), section.getCenterZ(),
-                CHUNK_SECTION_SIZE, CHUNK_SECTION_SIZE, CHUNK_SECTION_SIZE);
     }
 
     private static int getOutwardDirections(SectionPos origin, RenderSection section) {
@@ -669,6 +226,201 @@ public class OcclusionCuller {
         planes |= section.getChunkZ() >= origin.getZ() ? 1 << GraphDirection.SOUTH : 0;
 
         return planes;
+    }
+
+    private static boolean isWithinRenderDistance(CameraTransform camera, RenderSection section, float maxDistance) {
+        // origin point of the chunk's bounding box (in view space)
+        int ox = section.getOriginX() - camera.intX;
+        int oy = section.getOriginY() - camera.intY;
+        int oz = section.getOriginZ() - camera.intZ;
+
+        // coordinates of the point to compare (in view space)
+        // this is the closest point within the bounding box to the center (0, 0, 0)
+        float dx = nearestToZero(ox, ox + 16) - camera.fracX;
+        float dy = nearestToZero(oy, oy + 16) - camera.fracY;
+        float dz = nearestToZero(oz, oz + 16) - camera.fracZ;
+
+        // vanilla's "cylindrical fog" algorithm
+        // max(length(distance.xz), abs(distance.y))
+        return (((dx * dx) + (dz * dz)) < (maxDistance * maxDistance)) && (Math.abs(dy) < maxDistance);
+    }
+
+    @SuppressWarnings("ManualMinMaxCalculation") // we know what we are doing.
+    private static int nearestToZero(int min, int max) {
+        // this compiles to slightly better code than Math.min(Math.max(0, min), max)
+        int clamped = 0;
+        if (min > 0) { clamped = min; }
+        if (max < 0) { clamped = max; }
+        return clamped;
+    }
+
+    // The bounding box of a chunk section must be large enough to contain all possible geometry within it. Block models
+    // can extend outside a block volume by +/- 1.0 blocks on all axis. Additionally, we make use of a small epsilon
+    // to deal with floating point imprecision during a frustum check (see GH#2132).
+    private static final float CHUNK_SECTION_RADIUS = 8.0f /* chunk bounds */;
+    private static final float CHUNK_SECTION_SIZE = CHUNK_SECTION_RADIUS + 1.0f /* maximum model extent */ + 0.125f /* epsilon */;
+
+    public static boolean isWithinFrustum(Viewport viewport, RenderSection section) {
+        return viewport.isBoxVisible(section.getCenterX(), section.getCenterY(), section.getCenterZ(),
+                CHUNK_SECTION_SIZE, CHUNK_SECTION_SIZE, CHUNK_SECTION_SIZE);
+    }
+
+    // this bigger chunk section size is only used for frustum-testing nearby sections with large models
+    private static final float CHUNK_SECTION_SIZE_NEARBY = CHUNK_SECTION_RADIUS + 2.0f /* bigger model extent */ + 0.125f /* epsilon */;
+    
+    public static boolean isWithinNearbySectionFrustum(Viewport viewport, RenderSection section) {
+        return viewport.isBoxVisible(section.getCenterX(), section.getCenterY(), section.getCenterZ(),
+                CHUNK_SECTION_SIZE_NEARBY, CHUNK_SECTION_SIZE_NEARBY, CHUNK_SECTION_SIZE_NEARBY);
+    }
+
+    // This method visits sections near the origin that are not in the path of the graph traversal
+    // but have bounding boxes that may intersect with the frustum. It does this additional check
+    // for all neighboring, even diagonally neighboring, sections around the origin to render them
+    // if their extended bounding box is visible, and they may render large models that extend
+    // outside the 16x16x16 base volume of the section.
+    private void addNearbySections(Visitor visitor, Viewport viewport, float searchDistance, int frame) {
+        var origin = viewport.getChunkCoord();
+        var originX = origin.getX();
+        var originY = origin.getY();
+        var originZ = origin.getZ();
+
+        for (var dx = -1; dx <= 1; dx++) {
+            for (var dy = -1; dy <= 1; dy++) {
+                for (var dz = -1; dz <= 1; dz++) {
+                    if (dx == 0 && dy == 0 && dz == 0) {
+                        continue;
+                    }
+
+                    var section = this.getRenderSection(originX + dx, originY + dy, originZ + dz);
+
+                    // additionally render not yet visited but visible sections
+                    if (section != null && section.getLastVisibleFrame() != frame && isWithinNearbySectionFrustum(viewport, section)) {
+                        // reset state on first visit, but don't enqueue
+                        section.setLastVisibleFrame(frame);
+
+                        visitor.visit(section);
+                    }
+                }
+            }
+        }
+    }
+
+    private void init(Visitor visitor,
+                      WriteQueue<RenderSection> queue,
+                      Viewport viewport,
+                      float searchDistance,
+                      boolean useOcclusionCulling,
+                      int frame)
+    {
+        var origin = viewport.getChunkCoord();
+
+        if (origin.getY() < this.level.getMinSection()) {
+            // below the level
+            this.initOutsideWorldHeight(queue, viewport, searchDistance, frame,
+                    this.level.getMinSection(), GraphDirection.DOWN);
+        } else if (origin.getY() >= this.level.getMaxSection()) {
+            // above the level
+            this.initOutsideWorldHeight(queue, viewport, searchDistance, frame,
+                    this.level.getMaxSection() - 1, GraphDirection.UP);
+        } else {
+            this.initWithinWorld(visitor, queue, viewport, useOcclusionCulling, frame);
+        }
+    }
+
+    private void initWithinWorld(Visitor visitor, WriteQueue<RenderSection> queue, Viewport viewport, boolean useOcclusionCulling, int frame) {
+        var origin = viewport.getChunkCoord();
+        var section = this.getRenderSection(origin.getX(), origin.getY(), origin.getZ());
+
+        if (section == null) {
+            return;
+        }
+
+        section.setLastVisibleFrame(frame);
+        section.setIncomingDirections(GraphDirectionSet.NONE);
+
+        visitor.visit(section);
+
+        int outgoing;
+
+        if (useOcclusionCulling) {
+            // Since the camera is located inside this chunk, there are no "incoming" directions. So we need to instead
+            // find any possible paths out of this chunk and enqueue those neighbors.
+            outgoing = VisibilityEncoding.getConnections(section.getVisibilityData());
+        } else {
+            // Occlusion culling is disabled, so we can traverse into any neighbor.
+            outgoing = GraphDirectionSet.ALL;
+        }
+
+        visitNeighbors(queue, section, outgoing, frame);
+    }
+
+    // Enqueues sections that are inside the viewport using diamond spiral iteration to avoid sorting and ensure a
+    // consistent order. Innermost layers are enqueued first. Within each layer, iteration starts at the northernmost
+    // section and proceeds counterclockwise (N->W->S->E).
+    private void initOutsideWorldHeight(WriteQueue<RenderSection> queue,
+                                        Viewport viewport,
+                                        float searchDistance,
+                                        int frame,
+                                        int height,
+                                        int direction)
+    {
+        var origin = viewport.getChunkCoord();
+        var radius = Mth.floor(searchDistance / 16.0f);
+
+        // Layer 0
+        this.tryVisitNode(queue, origin.getX(), height, origin.getZ(), direction, frame, viewport);
+
+        // Complete layers, excluding layer 0
+        for (int layer = 1; layer <= radius; layer++) {
+            for (int z = -layer; z < layer; z++) {
+                int x = Math.abs(z) - layer;
+                this.tryVisitNode(queue, origin.getX() + x, height, origin.getZ() + z, direction, frame, viewport);
+            }
+
+            for (int z = layer; z > -layer; z--) {
+                int x = layer - Math.abs(z);
+                this.tryVisitNode(queue, origin.getX() + x, height, origin.getZ() + z, direction, frame, viewport);
+            }
+        }
+
+        // Incomplete layers
+        for (int layer = radius + 1; layer <= 2 * radius; layer++) {
+            int l = layer - radius;
+
+            for (int z = -radius; z <= -l; z++) {
+                int x = -z - layer;
+                this.tryVisitNode(queue, origin.getX() + x, height, origin.getZ() + z, direction, frame, viewport);
+            }
+
+            for (int z = l; z <= radius; z++) {
+                int x = z - layer;
+                this.tryVisitNode(queue, origin.getX() + x, height, origin.getZ() + z, direction, frame, viewport);
+            }
+
+            for (int z = radius; z >= l; z--) {
+                int x = layer - z;
+                this.tryVisitNode(queue, origin.getX() + x, height, origin.getZ() + z, direction, frame, viewport);
+            }
+
+            for (int z = -l; z >= -radius; z--) {
+                int x = layer + z;
+                this.tryVisitNode(queue, origin.getX() + x, height, origin.getZ() + z, direction, frame, viewport);
+            }
+        }
+    }
+
+    private void tryVisitNode(WriteQueue<RenderSection> queue, int x, int y, int z, int direction, int frame, Viewport viewport) {
+        RenderSection section = this.getRenderSection(x, y, z);
+
+        if (section == null || !isWithinFrustum(viewport, section)) {
+            return;
+        }
+
+        visitNode(queue, section, GraphDirectionSet.of(direction), frame);
+    }
+
+    private RenderSection getRenderSection(int x, int y, int z) {
+        return this.sections.get(SectionPos.asLong(x, y, z));
     }
 
     public interface Visitor {
