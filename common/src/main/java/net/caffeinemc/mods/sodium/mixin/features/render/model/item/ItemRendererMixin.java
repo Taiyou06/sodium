@@ -18,6 +18,7 @@ import net.minecraft.util.RandomSource;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.level.levelgen.SingleThreadedRandomSource;
+import org.joml.Matrix3f;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
 import org.spongepowered.asm.mixin.*;
@@ -49,37 +50,44 @@ public class ItemRendererMixin {
 
     @Unique
     private static boolean isFacingAway(PoseStack.Pose matrices, BakedQuad quad) {
+        // Early exit for GUI context
         if (currentRenderContext == ItemDisplayContext.GUI) {
             return false;
         }
 
         int[] vertices = quad.getVertices();
+        if (vertices.length < 32) {  // Basic validation
+            return false;
+        }
 
-        // Try to use the vertex normal if it exists (faster)
-        float nx = Float.intBitsToFloat(vertices[6]);  // Normal X component
-        float ny = Float.intBitsToFloat(vertices[7]);  // Normal Y component
-        float nz = Float.intBitsToFloat(vertices[14]); // Normal Z component
+        // Pre-fetch matrix references to avoid repeated lookups
+        Matrix4f modelViewMatrix = matrices.pose();
+        Matrix3f normalMatrix = matrices.normal();
+
+        // Check vertex normal first (most common case)
+        float nx = Float.intBitsToFloat(vertices[6]);
+        float ny = Float.intBitsToFloat(vertices[7]);
+        float nz = Float.intBitsToFloat(vertices[14]);
 
         if (nx != 0 || ny != 0 || nz != 0) {
-            // Use provided normal
+            // Transform vertex position (reuse VERTEX_1)
+            float x = Float.intBitsToFloat(vertices[0]);
+            float y = Float.intBitsToFloat(vertices[1]);
+            float z = Float.intBitsToFloat(vertices[2]);
+
+            VERTEX_1.set(x, y, z);
+            modelViewMatrix.transformPosition(VERTEX_1);
+
+            // Transform normal (reuse NORMAL)
             NORMAL.set(nx, ny, nz);
-            matrices.normal().transform(NORMAL);
+            normalMatrix.transform(NORMAL);
 
-            // Transform just one vertex for position
-            VERTEX_1.set(
-                    Float.intBitsToFloat(vertices[0]),
-                    Float.intBitsToFloat(vertices[1]),
-                    Float.intBitsToFloat(vertices[2])
-            );
-            matrices.pose().transformPosition(VERTEX_1);
-
+            // Single dot product calculation
             return NORMAL.dot(-VERTEX_1.x, -VERTEX_1.y, -VERTEX_1.z) < 0.0f;
         }
 
-        // Fallback to calculating normal if vertex normal doesn't exist
-        Matrix4f modelViewMatrix = matrices.pose();
-
-        // Load just the positions we need
+        // Fallback: Calculate face normal from vertices
+        // Load positions with direct array access
         float x1 = Float.intBitsToFloat(vertices[0]);
         float y1 = Float.intBitsToFloat(vertices[1]);
         float z1 = Float.intBitsToFloat(vertices[2]);
@@ -92,27 +100,19 @@ public class ItemRendererMixin {
         float y3 = Float.intBitsToFloat(vertices[17]);
         float z3 = Float.intBitsToFloat(vertices[18]);
 
-        // Calculate two edges directly
-        float edge1x = x2 - x1;
-        float edge1y = y2 - y1;
-        float edge1z = z2 - z1;
-
-        float edge2x = x3 - x1;
-        float edge2y = y3 - y1;
-        float edge2z = z3 - z1;
-
-        // Cross product to get normal
+        // Calculate edges and cross product in one step
         NORMAL.set(
-                edge1y * edge2z - edge1z * edge2y,
-                edge1z * edge2x - edge1x * edge2z,
-                edge1x * edge2y - edge1y * edge2x
+                (y2 - y1) * (z3 - z1) - (z2 - z1) * (y3 - y1),
+                (z2 - z1) * (x3 - x1) - (x2 - x1) * (z3 - z1),
+                (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1)
         );
 
-        // Transform normal and position
-        matrices.normal().transform(NORMAL);
+        // Transform normal and first vertex
+        normalMatrix.transform(NORMAL);
         VERTEX_1.set(x1, y1, z1);
         modelViewMatrix.transformPosition(VERTEX_1);
 
+        // Final dot product
         return NORMAL.dot(-VERTEX_1.x, -VERTEX_1.y, -VERTEX_1.z) < 0.0f;
     }
 
