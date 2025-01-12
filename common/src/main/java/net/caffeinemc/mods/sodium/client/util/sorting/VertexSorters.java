@@ -27,13 +27,17 @@ public class VertexSorters {
     private static abstract class AbstractVertexSorter implements VertexSorting {
         @Override
         public final int[] sort(Vector3f[] positions) {
-            final var keys = new int[positions.length];
+            return this.mergeSort(positions);
+        }
+
+        private int[] mergeSort(Vector3f[] positions) {
+            final var keys = new float[positions.length];
 
             for (int index = 0; index < positions.length; index++) {
-                keys[index] = ~Float.floatToRawIntBits(this.getKey(positions[index]));
+                keys[index] = this.getKey(positions[index]);
             }
 
-            return MixedSort.mixedSort(keys);
+            return MergeSort.mergeSort(keys);
         }
 
         protected abstract float getKey(Vector3f object);
