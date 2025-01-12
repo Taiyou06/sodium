@@ -53,8 +53,6 @@
   "sodium.options.sort_behavior.name": "Translucency Sorting",
   "sodium.options.sort_behavior.tooltip": "Enables translucency sorting. This avoids glitches in translucent blocks like water and glass when enabled and attempts to correctly present them even when the camera is in motion. This has a small performance impact on chunk loading and update speeds, but is usually not noticeable in frame rates.",
   "sodium.options.use_no_error_context.name": "Use No Error Context",
-  "sodium.options.chunk_frame_interval.name": "BFS Work Every",
-  "sodium.options.chunk_frame_interval.tooltip": "Controls how often chunk visibility is recalculated. Higher values improve performance but may cause momentarily 'missing' chunks.",
   "sodium.options.use_no_error_context.tooltip": "When enabled, the OpenGL context will be created with error checking disabled. This slightly improves rendering performance, but it can make debugging sudden unexplained crashes much harder.",
   "sodium.options.buttons.undo": "Undo",
   "sodium.options.buttons.apply": "Apply",

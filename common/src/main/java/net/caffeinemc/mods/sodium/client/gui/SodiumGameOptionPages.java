@@ -334,13 +334,6 @@ public class SodiumGameOptionPages {
                         .setEnabled(SodiumGameOptionPages::supportsNoErrorContext)
                         .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
                         .build())
-                .add(OptionImpl.createBuilder(int.class, sodiumOpts)
-                        .setName(Component.translatable("sodium.options.chunk_frame_interval.name", "Chunk Frame Interval"))
-                        .setTooltip(Component.translatable("sodium.options.chunk_frame_interval.tooltip", "Controls how often chunk visibility is recalculated. Higher values improve performance but may cause visual glitches."))
-                        .setControl(option -> new SliderControl(option, 1, 16, 1, value -> Component.nullToEmpty(value == 1 ? "1 frame" : value + " frames")))
-                        .setBinding((opts, value) -> opts.performance.chunkFrameInterval = value, opts -> opts.performance.chunkFrameInterval)
-                        .setImpact(OptionImpact.MEDIUM)
-                        .build())
                 .build());
 
         if (PlatformRuntimeInformation.getInstance().isDevelopmentEnvironment()) {

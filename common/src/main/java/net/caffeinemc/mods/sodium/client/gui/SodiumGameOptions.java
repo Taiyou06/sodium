@@ -46,9 +46,6 @@ public class SodiumGameOptions {
         public boolean useBlockFaceCulling = true;
         public boolean useNoErrorGLContext = true;
 
-        @SerializedName("chunk_frame_interval")
-        public int chunkFrameInterval = 3; // Skip every 3 frames by default
-
         @SerializedName("sorting_enabled_v2") // reset the older option in configs before we started hiding it
         public boolean sortingEnabled = true;
 
