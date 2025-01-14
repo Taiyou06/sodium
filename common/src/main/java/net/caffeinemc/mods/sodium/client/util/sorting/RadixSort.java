@@ -3,7 +3,7 @@ package net.caffeinemc.mods.sodium.client.util.sorting;
 import it.unimi.dsi.fastutil.ints.IntArrays;
 
 public class RadixSort {
-    private static final int RADIX_SORT_THRESHOLD = 80;
+    private static final int RADIX_SORT_THRESHOLD = 1;
 
     private static final int DIGIT_BITS = 8;
     private static final int RADIX_KEY_BITS = Integer.BYTES * 8;

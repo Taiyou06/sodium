@@ -18,7 +18,6 @@ import net.minecraft.util.RandomSource;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.level.levelgen.SingleThreadedRandomSource;
-import org.joml.Matrix3f;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
 import org.spongepowered.asm.mixin.*;
@@ -41,79 +40,106 @@ public class ItemRendererMixin {
 
     // Pre-allocated vectors to avoid object creation during rendering
     @Unique
-    private static final Vector3f VERTEX_1 = new Vector3f();
+    private static final Vector3f FACE_NORMAL = new Vector3f();
     @Unique
-    private static final Vector3f NORMAL = new Vector3f();
+    private static final Vector3f VERTEX_POS = new Vector3f();
+    @Unique
+    private static final Matrix4f FACE_NORMAL_MATRIX = new Matrix4f();
+
+    // New pre-allocated vectors for edge calculations
+    @Unique
+    private static final Vector3f EDGE1 = new Vector3f();
+    @Unique
+    private static final Vector3f EDGE2 = new Vector3f();
+
+    // Cache for vertex coordinates
+    @Unique
+    private static final float[] VERTEX_CACHE = new float[24]; // 8 floats per vertex, 3 vertices needed
 
     @Unique
     private static ItemDisplayContext currentRenderContext = ItemDisplayContext.NONE;
 
     @Unique
     private static boolean isFacingAway(PoseStack.Pose matrices, BakedQuad quad) {
-        // Early exit for GUI context
         if (currentRenderContext == ItemDisplayContext.GUI) {
             return false;
         }
 
         int[] vertices = quad.getVertices();
-        if (vertices.length < 32) {  // Basic validation
+        if (vertices.length < 32) {
             return false;
         }
 
-        // Pre-fetch matrix references to avoid repeated lookups
-        Matrix4f modelViewMatrix = matrices.pose();
-        Matrix3f normalMatrix = matrices.normal();
-
-        // Check vertex normal first (most common case)
+        // Extract normal directly from first vertex - most common case
         float nx = Float.intBitsToFloat(vertices[6]);
         float ny = Float.intBitsToFloat(vertices[7]);
         float nz = Float.intBitsToFloat(vertices[14]);
 
+        // Fast path for quads with normals
         if (nx != 0 || ny != 0 || nz != 0) {
-            // Transform vertex position (reuse VERTEX_1)
-            float x = Float.intBitsToFloat(vertices[0]);
-            float y = Float.intBitsToFloat(vertices[1]);
-            float z = Float.intBitsToFloat(vertices[2]);
+            matrices.pose().normal(FACE_NORMAL_MATRIX);
 
-            VERTEX_1.set(x, y, z);
-            modelViewMatrix.transformPosition(VERTEX_1);
+            // Transform normal using matrix multiplication
+            FACE_NORMAL.set(
+                    nx * FACE_NORMAL_MATRIX.m00() + ny * FACE_NORMAL_MATRIX.m01() + nz * FACE_NORMAL_MATRIX.m02(),
+                    nx * FACE_NORMAL_MATRIX.m10() + ny * FACE_NORMAL_MATRIX.m11() + nz * FACE_NORMAL_MATRIX.m12(),
+                    nx * FACE_NORMAL_MATRIX.m20() + ny * FACE_NORMAL_MATRIX.m21() + nz * FACE_NORMAL_MATRIX.m22()
+            );
 
-            // Transform normal (reuse NORMAL)
-            NORMAL.set(nx, ny, nz);
-            normalMatrix.transform(NORMAL);
+            // Transform first vertex position
+            VERTEX_POS.set(
+                    Float.intBitsToFloat(vertices[0]),
+                    Float.intBitsToFloat(vertices[1]),
+                    Float.intBitsToFloat(vertices[2])
+            );
+            matrices.pose().transformPosition(VERTEX_POS);
 
-            // Single dot product calculation
-            return NORMAL.dot(-VERTEX_1.x, -VERTEX_1.y, -VERTEX_1.z) < 0.0f;
+            // Optimized dot product calculation
+            return (FACE_NORMAL.x * -VERTEX_POS.x +
+                    FACE_NORMAL.y * -VERTEX_POS.y +
+                    FACE_NORMAL.z * -VERTEX_POS.z) < 0.0f;
         }
 
-        // Fallback: Calculate face normal from vertices
-        // Load positions with direct array access
-        float x1 = Float.intBitsToFloat(vertices[0]);
-        float y1 = Float.intBitsToFloat(vertices[1]);
-        float z1 = Float.intBitsToFloat(vertices[2]);
+        // Fallback path for quads without normals - using cached arrays
+        // Cache vertex coordinates to avoid repeated float conversions
+        for (int i = 0; i < 24; i += 8) {
+            int baseIndex = (i / 8) * 8;
+            VERTEX_CACHE[i] = Float.intBitsToFloat(vertices[baseIndex]);     // x
+            VERTEX_CACHE[i + 1] = Float.intBitsToFloat(vertices[baseIndex + 1]); // y
+            VERTEX_CACHE[i + 2] = Float.intBitsToFloat(vertices[baseIndex + 2]); // z
+        }
 
-        float x2 = Float.intBitsToFloat(vertices[8]);
-        float y2 = Float.intBitsToFloat(vertices[9]);
-        float z2 = Float.intBitsToFloat(vertices[10]);
-
-        float x3 = Float.intBitsToFloat(vertices[16]);
-        float y3 = Float.intBitsToFloat(vertices[17]);
-        float z3 = Float.intBitsToFloat(vertices[18]);
-
-        // Calculate edges and cross product in one step
-        NORMAL.set(
-                (y2 - y1) * (z3 - z1) - (z2 - z1) * (y3 - y1),
-                (z2 - z1) * (x3 - x1) - (x2 - x1) * (z3 - z1),
-                (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1)
+        // Calculate edges using pre-allocated vectors
+        EDGE1.set(
+                VERTEX_CACHE[8] - VERTEX_CACHE[0],
+                VERTEX_CACHE[9] - VERTEX_CACHE[1],
+                VERTEX_CACHE[10] - VERTEX_CACHE[2]
         );
 
-        // Transform normal and first vertex
-        normalMatrix.transform(NORMAL);
-        VERTEX_1.set(x1, y1, z1);
-        modelViewMatrix.transformPosition(VERTEX_1);
+        EDGE2.set(
+                VERTEX_CACHE[16] - VERTEX_CACHE[0],
+                VERTEX_CACHE[17] - VERTEX_CACHE[1],
+                VERTEX_CACHE[18] - VERTEX_CACHE[2]
+        );
 
-        // Final dot product
-        return NORMAL.dot(-VERTEX_1.x, -VERTEX_1.y, -VERTEX_1.z) < 0.0f;
+        // Calculate cross product directly into FACE_NORMAL
+        FACE_NORMAL.set(
+                EDGE1.y * EDGE2.z - EDGE1.z * EDGE2.y,
+                EDGE1.z * EDGE2.x - EDGE1.x * EDGE2.z,
+                EDGE1.x * EDGE2.y - EDGE1.y * EDGE2.x
+        );
+
+        matrices.pose().normal(FACE_NORMAL_MATRIX);
+        FACE_NORMAL_MATRIX.transformDirection(FACE_NORMAL);
+
+        // Transform first vertex
+        VERTEX_POS.set(VERTEX_CACHE[0], VERTEX_CACHE[1], VERTEX_CACHE[2]);
+        matrices.pose().transformPosition(VERTEX_POS);
+
+        // Optimized dot product calculation
+        return (FACE_NORMAL.x * -VERTEX_POS.x +
+                FACE_NORMAL.y * -VERTEX_POS.y +
+                FACE_NORMAL.z * -VERTEX_POS.z) < 0.0f;
     }
 
     @Inject(method = "render", at = @At("HEAD"))
