@@ -16,85 +16,182 @@ import net.minecraft.client.resources.model.BakedModel;
 import net.minecraft.core.Direction;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.level.levelgen.SingleThreadedRandomSource;
+import org.joml.Matrix3f;
+import org.joml.Matrix4f;
+import org.joml.Vector3f;
 import org.spongepowered.asm.mixin.*;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import net.minecraft.client.renderer.MultiBufferSource;
 import java.util.List;
 
 @Mixin(ItemRenderer.class)
 public class ItemRendererMixin {
     @Unique
-    private final RandomSource random = new SingleThreadedRandomSource(42L);
+    private static final RandomSource RANDOM = new SingleThreadedRandomSource(42L);
 
     @Shadow
     @Final
     private ItemColors itemColors;
 
-    /**
-     * @reason Avoid allocations
-     * @author JellySquid
-     */
+    // Pre-allocated vectors to avoid object creation during rendering
+    @Unique
+    private static final Vector3f VERTEX_1 = new Vector3f();
+    @Unique
+    private static final Vector3f NORMAL = new Vector3f();
+
+    @Unique
+    private static ItemDisplayContext currentRenderContext = ItemDisplayContext.NONE;
+
+    @Unique
+    private static boolean isFacingAway(PoseStack.Pose matrices, BakedQuad quad) {
+        // Early exit for GUI context
+        if (currentRenderContext == ItemDisplayContext.GUI) {
+            return false;
+        }
+
+        int[] vertices = quad.getVertices();
+        if (vertices.length < 32) {  // Basic validation
+            return false;
+        }
+
+        // Pre-fetch matrix references to avoid repeated lookups
+        Matrix4f modelViewMatrix = matrices.pose();
+        Matrix3f normalMatrix = matrices.normal();
+
+        // Check vertex normal first (most common case)
+        float nx = Float.intBitsToFloat(vertices[6]);
+        float ny = Float.intBitsToFloat(vertices[7]);
+        float nz = Float.intBitsToFloat(vertices[14]);
+
+        if (nx != 0 || ny != 0 || nz != 0) {
+            // Transform vertex position (reuse VERTEX_1)
+            float x = Float.intBitsToFloat(vertices[0]);
+            float y = Float.intBitsToFloat(vertices[1]);
+            float z = Float.intBitsToFloat(vertices[2]);
+
+            VERTEX_1.set(x, y, z);
+            modelViewMatrix.transformPosition(VERTEX_1);
+
+            // Transform normal (reuse NORMAL)
+            NORMAL.set(nx, ny, nz);
+            normalMatrix.transform(NORMAL);
+
+            // Single dot product calculation
+            return NORMAL.dot(-VERTEX_1.x, -VERTEX_1.y, -VERTEX_1.z) < 0.0f;
+        }
+
+        // Fallback: Calculate face normal from vertices
+        // Load positions with direct array access
+        float x1 = Float.intBitsToFloat(vertices[0]);
+        float y1 = Float.intBitsToFloat(vertices[1]);
+        float z1 = Float.intBitsToFloat(vertices[2]);
+
+        float x2 = Float.intBitsToFloat(vertices[8]);
+        float y2 = Float.intBitsToFloat(vertices[9]);
+        float z2 = Float.intBitsToFloat(vertices[10]);
+
+        float x3 = Float.intBitsToFloat(vertices[16]);
+        float y3 = Float.intBitsToFloat(vertices[17]);
+        float z3 = Float.intBitsToFloat(vertices[18]);
+
+        // Calculate edges and cross product in one step
+        NORMAL.set(
+                (y2 - y1) * (z3 - z1) - (z2 - z1) * (y3 - y1),
+                (z2 - z1) * (x3 - x1) - (x2 - x1) * (z3 - z1),
+                (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1)
+        );
+
+        // Transform normal and first vertex
+        normalMatrix.transform(NORMAL);
+        VERTEX_1.set(x1, y1, z1);
+        modelViewMatrix.transformPosition(VERTEX_1);
+
+        // Final dot product
+        return NORMAL.dot(-VERTEX_1.x, -VERTEX_1.y, -VERTEX_1.z) < 0.0f;
+    }
+
+    @Inject(method = "render", at = @At("HEAD"))
+    private void onRenderStart(ItemStack stack, ItemDisplayContext transform, boolean leftHanded, PoseStack matrices,
+                               MultiBufferSource vertexConsumers, int light, int overlay, BakedModel model, CallbackInfo ci) {
+        currentRenderContext = transform;
+    }
+
+    @Inject(method = "render", at = @At("RETURN"))
+    private void onRenderEnd(ItemStack stack, ItemDisplayContext transform, boolean leftHanded, PoseStack matrices,
+                             MultiBufferSource vertexConsumers, int light, int overlay, BakedModel model, CallbackInfo ci) {
+        currentRenderContext = ItemDisplayContext.NONE;
+    }
+
     @Inject(method = "renderModelLists", at = @At("HEAD"), cancellable = true)
     private void renderModelFast(BakedModel model, ItemStack itemStack, int light, int overlay, PoseStack matrixStack, VertexConsumer vertexConsumer, CallbackInfo ci) {
         var writer = VertexConsumerUtils.convertOrLog(vertexConsumer);
-
         if (writer == null) {
             return;
         }
 
         ci.cancel();
 
-        RandomSource random = this.random;
         PoseStack.Pose matrices = matrixStack.last();
+        ItemColor colorProvider = !itemStack.isEmpty() ? ((ItemColorsExtension) this.itemColors).sodium$getColorProvider(itemStack) : null;
 
-        ItemColor colorProvider = null;
-
-        if (!itemStack.isEmpty()) {
-            colorProvider = ((ItemColorsExtension) this.itemColors).sodium$getColorProvider(itemStack);
-        }
-
+        // Process directional quads
         for (Direction direction : DirectionUtil.ALL_DIRECTIONS) {
-            random.setSeed(42L);
-            List<BakedQuad> quads = model.getQuads(null, direction, random);
-
+            RANDOM.setSeed(42L);
+            List<BakedQuad> quads = model.getQuads(null, direction, RANDOM);
             if (!quads.isEmpty()) {
-                this.renderBakedItemQuads(matrices, writer, quads, itemStack, colorProvider, light, overlay);
+                renderBakedItemQuads(matrices, writer, quads, itemStack, colorProvider, light, overlay);
             }
         }
 
-        random.setSeed(42L);
-        List<BakedQuad> quads = model.getQuads(null, null, random);
-
+        // Process non-directional quads
+        RANDOM.setSeed(42L);
+        List<BakedQuad> quads = model.getQuads(null, null, RANDOM);
         if (!quads.isEmpty()) {
-            this.renderBakedItemQuads(matrices, writer, quads, itemStack, colorProvider, light, overlay);
+            renderBakedItemQuads(matrices, writer, quads, itemStack, colorProvider, light, overlay);
         }
     }
 
     @Unique
-    @SuppressWarnings("ForLoopReplaceableByForEach")
     private void renderBakedItemQuads(PoseStack.Pose matrices, VertexBufferWriter writer, List<BakedQuad> quads, ItemStack itemStack, ItemColor colorProvider, int light, int overlay) {
-        for (int i = 0; i < quads.size(); i++) {
+        final int quadCount = quads.size();
+        if (quadCount == 0) return;
+
+        final boolean shouldMultiplyAlpha = BakedModelEncoder.shouldMultiplyAlpha();
+        final int defaultColor = 0xFFFFFFFF;
+
+        if (colorProvider == null) {
+            for (int i = 0; i < quadCount; i++) {
+                BakedQuad bakedQuad = quads.get(i);
+                if (bakedQuad.getVertices().length < 32) continue;
+
+                if (!isFacingAway(matrices, bakedQuad)) {
+                    BakedQuadView quad = (BakedQuadView) bakedQuad;
+                    BakedModelEncoder.writeQuadVertices(writer, matrices, quad, defaultColor, light, overlay, shouldMultiplyAlpha);
+                    SpriteUtil.markSpriteActive(quad.getSprite());
+                }
+            }
+            return;
+        }
+
+        for (int i = 0; i < quadCount; i++) {
             BakedQuad bakedQuad = quads.get(i);
+            if (bakedQuad.getVertices().length < 32) continue;
 
-            if (bakedQuad.getVertices().length < 32) {
-                continue; // ignore bad quads
+            if (!isFacingAway(matrices, bakedQuad)) {
+                BakedQuadView quad = (BakedQuadView) bakedQuad;
+                int color = quad.hasColor()
+                        ? ColorARGB.toABGR(colorProvider.getColor(itemStack, quad.getColorIndex()))
+                        : defaultColor;
+
+                BakedModelEncoder.writeQuadVertices(writer, matrices, quad, color, light, overlay, shouldMultiplyAlpha);
+                SpriteUtil.markSpriteActive(quad.getSprite());
             }
-
-            BakedQuadView quad = (BakedQuadView) bakedQuad;
-
-            int color = 0xFFFFFFFF;
-
-            if (colorProvider != null && quad.hasColor()) {
-                color = ColorARGB.toABGR((colorProvider.getColor(itemStack, quad.getColorIndex())));
-            }
-
-            BakedModelEncoder.writeQuadVertices(writer, matrices, quad, color, light, overlay, BakedModelEncoder.shouldMultiplyAlpha());
-
-            SpriteUtil.markSpriteActive(quad.getSprite());
         }
     }
 }
