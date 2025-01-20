@@ -41,9 +41,11 @@ public class ItemRendererMixin {
 
     // Pre-allocated vectors to avoid object creation during rendering
     @Unique
-    private static final Vector3f VERTEX_1 = new Vector3f();
+    private static final Vector3f VERTEX_POS = new Vector3f();
     @Unique
-    private static final Vector3f NORMAL = new Vector3f();
+    private static final Vector3f NORMAL_VEC = new Vector3f();
+    @Unique
+    private static final float[] VERTEX_DATA = new float[3];
 
     @Unique
     private static ItemDisplayContext currentRenderContext = ItemDisplayContext.NONE;
@@ -56,65 +58,66 @@ public class ItemRendererMixin {
         }
 
         int[] vertices = quad.getVertices();
-        if (vertices.length < 32) {  // Basic validation
+        if (vertices.length < 32) {
             return false;
         }
 
-        // Pre-fetch matrix references to avoid repeated lookups
+        // Pre-fetch matrix references
         Matrix4f modelViewMatrix = matrices.pose();
         Matrix3f normalMatrix = matrices.normal();
 
-        // Check vertex normal first (most common case)
+        // Fast path: Use existing normal if available
         float nx = Float.intBitsToFloat(vertices[6]);
         float ny = Float.intBitsToFloat(vertices[7]);
         float nz = Float.intBitsToFloat(vertices[14]);
 
         if (nx != 0 || ny != 0 || nz != 0) {
-            // Transform vertex position (reuse VERTEX_1)
-            float x = Float.intBitsToFloat(vertices[0]);
-            float y = Float.intBitsToFloat(vertices[1]);
-            float z = Float.intBitsToFloat(vertices[2]);
+            // Load position directly into array for better locality
+            VERTEX_DATA[0] = Float.intBitsToFloat(vertices[0]);
+            VERTEX_DATA[1] = Float.intBitsToFloat(vertices[1]);
+            VERTEX_DATA[2] = Float.intBitsToFloat(vertices[2]);
 
-            VERTEX_1.set(x, y, z);
-            modelViewMatrix.transformPosition(VERTEX_1);
+            VERTEX_POS.set(VERTEX_DATA[0], VERTEX_DATA[1], VERTEX_DATA[2]);
+            modelViewMatrix.transformPosition(VERTEX_POS);
 
-            // Transform normal (reuse NORMAL)
-            NORMAL.set(nx, ny, nz);
-            normalMatrix.transform(NORMAL);
+            NORMAL_VEC.set(nx, ny, nz);
+            normalMatrix.transform(NORMAL_VEC);
 
-            // Single dot product calculation
-            return NORMAL.dot(-VERTEX_1.x, -VERTEX_1.y, -VERTEX_1.z) < 0.0f;
+            // Single dot product with negated vertex position
+            return NORMAL_VEC.dot(-VERTEX_POS.x, -VERTEX_POS.y, -VERTEX_POS.z) < 0.0f;
         }
 
-        // Fallback: Calculate face normal from vertices
-        // Load positions with direct array access
-        float x1 = Float.intBitsToFloat(vertices[0]);
-        float y1 = Float.intBitsToFloat(vertices[1]);
-        float z1 = Float.intBitsToFloat(vertices[2]);
+        // Slow path: Calculate face normal
+        // Load positions directly into working array
+        VERTEX_DATA[0] = Float.intBitsToFloat(vertices[0]);
+        VERTEX_DATA[1] = Float.intBitsToFloat(vertices[1]);
+        VERTEX_DATA[2] = Float.intBitsToFloat(vertices[2]);
+        float x1 = VERTEX_DATA[0], y1 = VERTEX_DATA[1], z1 = VERTEX_DATA[2];
 
-        float x2 = Float.intBitsToFloat(vertices[8]);
-        float y2 = Float.intBitsToFloat(vertices[9]);
-        float z2 = Float.intBitsToFloat(vertices[10]);
+        VERTEX_DATA[0] = Float.intBitsToFloat(vertices[8]);
+        VERTEX_DATA[1] = Float.intBitsToFloat(vertices[9]);
+        VERTEX_DATA[2] = Float.intBitsToFloat(vertices[10]);
+        float x2 = VERTEX_DATA[0], y2 = VERTEX_DATA[1], z2 = VERTEX_DATA[2];
 
-        float x3 = Float.intBitsToFloat(vertices[16]);
-        float y3 = Float.intBitsToFloat(vertices[17]);
-        float z3 = Float.intBitsToFloat(vertices[18]);
+        VERTEX_DATA[0] = Float.intBitsToFloat(vertices[16]);
+        VERTEX_DATA[1] = Float.intBitsToFloat(vertices[17]);
+        VERTEX_DATA[2] = Float.intBitsToFloat(vertices[18]);
+        float x3 = VERTEX_DATA[0], y3 = VERTEX_DATA[1], z3 = VERTEX_DATA[2];
 
-        // Calculate edges and cross product in one step
-        NORMAL.set(
+        // Calculate edges and cross product in single step
+        NORMAL_VEC.set(
                 (y2 - y1) * (z3 - z1) - (z2 - z1) * (y3 - y1),
                 (z2 - z1) * (x3 - x1) - (x2 - x1) * (z3 - z1),
                 (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1)
         );
 
-        // Transform normal and first vertex
-        normalMatrix.transform(NORMAL);
-        VERTEX_1.set(x1, y1, z1);
-        modelViewMatrix.transformPosition(VERTEX_1);
+        normalMatrix.transform(NORMAL_VEC);
+        VERTEX_POS.set(x1, y1, z1);
+        modelViewMatrix.transformPosition(VERTEX_POS);
 
-        // Final dot product
-        return NORMAL.dot(-VERTEX_1.x, -VERTEX_1.y, -VERTEX_1.z) < 0.0f;
+        return NORMAL_VEC.dot(-VERTEX_POS.x, -VERTEX_POS.y, -VERTEX_POS.z) < 0.0f;
     }
+
 
     @Inject(method = "render", at = @At("HEAD"))
     private void onRenderStart(ItemStack stack, ItemDisplayContext transform, boolean leftHanded, PoseStack matrices,
