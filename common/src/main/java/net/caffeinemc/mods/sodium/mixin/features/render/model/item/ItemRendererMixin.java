@@ -1,5 +1,6 @@
 package net.caffeinemc.mods.sodium.mixin.features.render.model.item;
 
+import net.caffeinemc.mods.sodium.api.math.MatrixHelper;
 import net.caffeinemc.mods.sodium.client.model.quad.BakedQuadView;
 import net.caffeinemc.mods.sodium.client.render.immediate.model.BakedModelEncoder;
 import net.caffeinemc.mods.sodium.client.render.texture.SpriteUtil;
@@ -18,9 +19,6 @@ import net.minecraft.util.RandomSource;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.level.levelgen.SingleThreadedRandomSource;
-import org.joml.Matrix3f;
-import org.joml.Matrix4f;
-import org.joml.Vector3f;
 import org.spongepowered.asm.mixin.*;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -29,6 +27,8 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import net.minecraft.client.renderer.MultiBufferSource;
 import java.util.List;
+
+import static net.caffeinemc.mods.sodium.client.util.ModelQuadUtil.VERTEX_SIZE;
 
 @Mixin(ItemRenderer.class)
 public class ItemRendererMixin {
@@ -41,11 +41,7 @@ public class ItemRendererMixin {
 
     // Pre-allocated vectors to avoid object creation during rendering
     @Unique
-    private static final Vector3f VERTEX_POS = new Vector3f();
-    @Unique
-    private static final Vector3f NORMAL_VEC = new Vector3f();
-    @Unique
-    private static final float[] VERTEX_DATA = new float[3];
+    private static final int DEFAULT_COLOR = 0xFFFFFFFF;
 
     @Unique
     private static ItemDisplayContext currentRenderContext = ItemDisplayContext.NONE;
@@ -62,60 +58,62 @@ public class ItemRendererMixin {
             return false;
         }
 
-        // Pre-fetch matrix references
-        Matrix4f modelViewMatrix = matrices.pose();
-        Matrix3f normalMatrix = matrices.normal();
-
         // Fast path: Use existing normal if available
         float nx = Float.intBitsToFloat(vertices[6]);
         float ny = Float.intBitsToFloat(vertices[7]);
         float nz = Float.intBitsToFloat(vertices[14]);
 
         if (nx != 0 || ny != 0 || nz != 0) {
-            // Load position directly into array for better locality
-            VERTEX_DATA[0] = Float.intBitsToFloat(vertices[0]);
-            VERTEX_DATA[1] = Float.intBitsToFloat(vertices[1]);
-            VERTEX_DATA[2] = Float.intBitsToFloat(vertices[2]);
+            // Use MatrixHelper for position transformation
+            float x = Float.intBitsToFloat(vertices[0]);
+            float y = Float.intBitsToFloat(vertices[1]);
+            float z = Float.intBitsToFloat(vertices[2]);
 
-            VERTEX_POS.set(VERTEX_DATA[0], VERTEX_DATA[1], VERTEX_DATA[2]);
-            modelViewMatrix.transformPosition(VERTEX_POS);
+            // Transform position using optimized helper
+            float xt = MatrixHelper.transformPositionX(matrices.pose(), x, y, z);
+            float yt = MatrixHelper.transformPositionY(matrices.pose(), x, y, z);
+            float zt = MatrixHelper.transformPositionZ(matrices.pose(), x, y, z);
 
-            NORMAL_VEC.set(nx, ny, nz);
-            normalMatrix.transform(NORMAL_VEC);
+            // Transform normal using optimized helper
+            float nxt = MatrixHelper.transformNormalX(matrices.normal(), nx, ny, nz);
+            float nyt = MatrixHelper.transformNormalY(matrices.normal(), nx, ny, nz);
+            float nzt = MatrixHelper.transformNormalZ(matrices.normal(), nx, ny, nz);
 
-            // Single dot product with negated vertex position
-            return NORMAL_VEC.dot(-VERTEX_POS.x, -VERTEX_POS.y, -VERTEX_POS.z) < 0.0f;
+            // Direct dot product calculation
+            return (nxt * -xt + nyt * -yt + nzt * -zt) < 0.0f;
         }
 
         // Slow path: Calculate face normal
-        // Load positions directly into working array
-        VERTEX_DATA[0] = Float.intBitsToFloat(vertices[0]);
-        VERTEX_DATA[1] = Float.intBitsToFloat(vertices[1]);
-        VERTEX_DATA[2] = Float.intBitsToFloat(vertices[2]);
-        float x1 = VERTEX_DATA[0], y1 = VERTEX_DATA[1], z1 = VERTEX_DATA[2];
+        // Load positions and use MatrixHelper for transformations
+        float x1 = Float.intBitsToFloat(vertices[0]);
+        float y1 = Float.intBitsToFloat(vertices[1]);
+        float z1 = Float.intBitsToFloat(vertices[2]);
 
-        VERTEX_DATA[0] = Float.intBitsToFloat(vertices[8]);
-        VERTEX_DATA[1] = Float.intBitsToFloat(vertices[9]);
-        VERTEX_DATA[2] = Float.intBitsToFloat(vertices[10]);
-        float x2 = VERTEX_DATA[0], y2 = VERTEX_DATA[1], z2 = VERTEX_DATA[2];
+        float x2 = Float.intBitsToFloat(vertices[8]);
+        float y2 = Float.intBitsToFloat(vertices[9]);
+        float z2 = Float.intBitsToFloat(vertices[10]);
 
-        VERTEX_DATA[0] = Float.intBitsToFloat(vertices[16]);
-        VERTEX_DATA[1] = Float.intBitsToFloat(vertices[17]);
-        VERTEX_DATA[2] = Float.intBitsToFloat(vertices[18]);
-        float x3 = VERTEX_DATA[0], y3 = VERTEX_DATA[1], z3 = VERTEX_DATA[2];
+        float x3 = Float.intBitsToFloat(vertices[16]);
+        float y3 = Float.intBitsToFloat(vertices[17]);
+        float z3 = Float.intBitsToFloat(vertices[18]);
 
-        // Calculate edges and cross product in single step
-        NORMAL_VEC.set(
-                (y2 - y1) * (z3 - z1) - (z2 - z1) * (y3 - y1),
-                (z2 - z1) * (x3 - x1) - (x2 - x1) * (z3 - z1),
-                (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1)
-        );
+        // Calculate face normal components
+        float normalX = (y2 - y1) * (z3 - z1) - (z2 - z1) * (y3 - y1);
+        float normalY = (z2 - z1) * (x3 - x1) - (x2 - x1) * (z3 - z1);
+        float normalZ = (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1);
 
-        normalMatrix.transform(NORMAL_VEC);
-        VERTEX_POS.set(x1, y1, z1);
-        modelViewMatrix.transformPosition(VERTEX_POS);
+        // Transform normal using optimized helper
+        float nxt = MatrixHelper.transformNormalX(matrices.normal(), normalX, normalY, normalZ);
+        float nyt = MatrixHelper.transformNormalY(matrices.normal(), normalX, normalY, normalZ);
+        float nzt = MatrixHelper.transformNormalZ(matrices.normal(), normalX, normalY, normalZ);
 
-        return NORMAL_VEC.dot(-VERTEX_POS.x, -VERTEX_POS.y, -VERTEX_POS.z) < 0.0f;
+        // Transform first vertex position using optimized helper
+        float xt = MatrixHelper.transformPositionX(matrices.pose(), x1, y1, z1);
+        float yt = MatrixHelper.transformPositionY(matrices.pose(), x1, y1, z1);
+        float zt = MatrixHelper.transformPositionZ(matrices.pose(), x1, y1, z1);
+
+        // Direct dot product calculation
+        return (nxt * -xt + nyt * -yt + nzt * -zt) < 0.0f;
     }
 
 
@@ -161,36 +159,60 @@ public class ItemRendererMixin {
     }
 
     @Unique
-    private void renderBakedItemQuads(PoseStack.Pose matrices, VertexBufferWriter writer, List<BakedQuad> quads, ItemStack itemStack, ItemColor colorProvider, int light, int overlay) {
+    private void renderBakedItemQuads(PoseStack.Pose matrices, VertexBufferWriter writer, List<BakedQuad> quads,
+                                      ItemStack itemStack, ItemColor colorProvider, int light, int overlay) {
         final int quadCount = quads.size();
         if (quadCount == 0) return;
 
+        // Pre-fetch shouldMultiplyAlpha to avoid multiple calls
         final boolean shouldMultiplyAlpha = BakedModelEncoder.shouldMultiplyAlpha();
-        final int defaultColor = 0xFFFFFFFF;
 
+        // Fast path for non-colored quads
         if (colorProvider == null) {
-            for (int i = 0; i < quadCount; i++) {
-                BakedQuad bakedQuad = quads.get(i);
-                if (bakedQuad.getVertices().length < 32) continue;
-
-                if (!isFacingAway(matrices, bakedQuad)) {
-                    BakedQuadView quad = (BakedQuadView) bakedQuad;
-                    BakedModelEncoder.writeQuadVertices(writer, matrices, quad, defaultColor, light, overlay, shouldMultiplyAlpha);
-                    SpriteUtil.markSpriteActive(quad.getSprite());
-                }
-            }
+            renderUncoloredQuads(matrices, writer, quads, quadCount, light, overlay, shouldMultiplyAlpha);
             return;
         }
 
+        // Colored quads path
+        renderColoredQuads(matrices, writer, quads, quadCount, itemStack, colorProvider, light, overlay, shouldMultiplyAlpha);
+    }
+
+    @Unique
+    private void renderUncoloredQuads(PoseStack.Pose matrices, VertexBufferWriter writer, List<BakedQuad> quads,
+                                      int quadCount, int light, int overlay, boolean shouldMultiplyAlpha) {
         for (int i = 0; i < quadCount; i++) {
             BakedQuad bakedQuad = quads.get(i);
-            if (bakedQuad.getVertices().length < 32) continue;
+            if (bakedQuad.getVertices().length < VERTEX_SIZE) continue;
 
-            if (!isFacingAway(matrices, bakedQuad)) {
+            // Skip backface check if not necessary
+            if (currentRenderContext == ItemDisplayContext.GUI || !isFacingAway(matrices, bakedQuad)) {
                 BakedQuadView quad = (BakedQuadView) bakedQuad;
-                int color = quad.hasColor()
+                BakedModelEncoder.writeQuadVertices(writer, matrices, quad, DEFAULT_COLOR, light, overlay, shouldMultiplyAlpha);
+                SpriteUtil.markSpriteActive(quad.getSprite());
+            }
+        }
+    }
+
+    @Unique
+    private void renderColoredQuads(PoseStack.Pose matrices, VertexBufferWriter writer, List<BakedQuad> quads,
+                                    int quadCount, ItemStack itemStack, ItemColor colorProvider,
+                                    int light, int overlay, boolean shouldMultiplyAlpha) {
+        // Pre-cast to avoid repeated casting
+        BakedQuadView quad;
+        int color;
+
+        for (int i = 0; i < quadCount; i++) {
+            BakedQuad bakedQuad = quads.get(i);
+            if (bakedQuad.getVertices().length < VERTEX_SIZE) continue;
+
+            // Skip backface check if not necessary
+            if (currentRenderContext == ItemDisplayContext.GUI || !isFacingAway(matrices, bakedQuad)) {
+                quad = (BakedQuadView) bakedQuad;
+
+                // Inline color calculation for better performance
+                color = quad.hasColor()
                         ? ColorARGB.toABGR(colorProvider.getColor(itemStack, quad.getColorIndex()))
-                        : defaultColor;
+                        : DEFAULT_COLOR;
 
                 BakedModelEncoder.writeQuadVertices(writer, matrices, quad, color, light, overlay, shouldMultiplyAlpha);
                 SpriteUtil.markSpriteActive(quad.getSprite());
