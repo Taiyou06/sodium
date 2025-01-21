@@ -1,5 +1,6 @@
 package net.caffeinemc.mods.sodium.mixin.features.render.model.item;
 
+import net.caffeinemc.mods.sodium.api.math.MatrixHelper;
 import net.caffeinemc.mods.sodium.client.model.quad.BakedQuadView;
 import net.caffeinemc.mods.sodium.client.render.immediate.model.BakedModelEncoder;
 import net.caffeinemc.mods.sodium.client.render.texture.SpriteUtil;
@@ -20,7 +21,6 @@ import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.level.levelgen.SingleThreadedRandomSource;
 import org.joml.Matrix3f;
 import org.joml.Matrix4f;
-import org.joml.Vector3f;
 import org.spongepowered.asm.mixin.*;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -39,14 +39,6 @@ public class ItemRendererMixin {
     @Final
     private ItemColors itemColors;
 
-    // Pre-allocated vectors to avoid object creation during rendering
-    @Unique
-    private static final Vector3f VERTEX_POS = new Vector3f();
-    @Unique
-    private static final Vector3f NORMAL_VEC = new Vector3f();
-    @Unique
-    private static final float[] VERTEX_DATA = new float[3];
-
     @Unique
     private static ItemDisplayContext currentRenderContext = ItemDisplayContext.NONE;
 
@@ -62,7 +54,7 @@ public class ItemRendererMixin {
             return false;
         }
 
-        // Pre-fetch matrix references
+        // Pre-fetch matrix references once
         Matrix4f modelViewMatrix = matrices.pose();
         Matrix3f normalMatrix = matrices.normal();
 
@@ -72,50 +64,56 @@ public class ItemRendererMixin {
         float nz = Float.intBitsToFloat(vertices[14]);
 
         if (nx != 0 || ny != 0 || nz != 0) {
-            // Load position directly into array for better locality
-            VERTEX_DATA[0] = Float.intBitsToFloat(vertices[0]);
-            VERTEX_DATA[1] = Float.intBitsToFloat(vertices[1]);
-            VERTEX_DATA[2] = Float.intBitsToFloat(vertices[2]);
+            // Transform position using optimized helper
+            float x = Float.intBitsToFloat(vertices[0]);
+            float y = Float.intBitsToFloat(vertices[1]);
+            float z = Float.intBitsToFloat(vertices[2]);
 
-            VERTEX_POS.set(VERTEX_DATA[0], VERTEX_DATA[1], VERTEX_DATA[2]);
-            modelViewMatrix.transformPosition(VERTEX_POS);
+            float transformedX = MatrixHelper.transformPositionX(modelViewMatrix, x, y, z);
+            float transformedY = MatrixHelper.transformPositionY(modelViewMatrix, x, y, z);
+            float transformedZ = MatrixHelper.transformPositionZ(modelViewMatrix, x, y, z);
 
-            NORMAL_VEC.set(nx, ny, nz);
-            normalMatrix.transform(NORMAL_VEC);
+            // Transform normal using optimized helper
+            float transformedNX = MatrixHelper.transformNormalX(normalMatrix, nx, ny, nz);
+            float transformedNY = MatrixHelper.transformNormalY(normalMatrix, nx, ny, nz);
+            float transformedNZ = MatrixHelper.transformNormalZ(normalMatrix, nx, ny, nz);
 
-            // Single dot product with negated vertex position
-            return NORMAL_VEC.dot(-VERTEX_POS.x, -VERTEX_POS.y, -VERTEX_POS.z) < 0.0f;
+            // Single dot product calculation
+            return (transformedNX * -transformedX +
+                    transformedNY * -transformedY +
+                    transformedNZ * -transformedZ) < 0.0f;
         }
 
         // Slow path: Calculate face normal
-        // Load positions directly into working array
-        VERTEX_DATA[0] = Float.intBitsToFloat(vertices[0]);
-        VERTEX_DATA[1] = Float.intBitsToFloat(vertices[1]);
-        VERTEX_DATA[2] = Float.intBitsToFloat(vertices[2]);
-        float x1 = VERTEX_DATA[0], y1 = VERTEX_DATA[1], z1 = VERTEX_DATA[2];
+        float x1 = Float.intBitsToFloat(vertices[0]);
+        float y1 = Float.intBitsToFloat(vertices[1]);
+        float z1 = Float.intBitsToFloat(vertices[2]);
+        float x2 = Float.intBitsToFloat(vertices[8]);
+        float y2 = Float.intBitsToFloat(vertices[9]);
+        float z2 = Float.intBitsToFloat(vertices[10]);
+        float x3 = Float.intBitsToFloat(vertices[16]);
+        float y3 = Float.intBitsToFloat(vertices[17]);
+        float z3 = Float.intBitsToFloat(vertices[18]);
 
-        VERTEX_DATA[0] = Float.intBitsToFloat(vertices[8]);
-        VERTEX_DATA[1] = Float.intBitsToFloat(vertices[9]);
-        VERTEX_DATA[2] = Float.intBitsToFloat(vertices[10]);
-        float x2 = VERTEX_DATA[0], y2 = VERTEX_DATA[1], z2 = VERTEX_DATA[2];
+        // Calculate normal components directly
+        float normalX = (y2 - y1) * (z3 - z1) - (z2 - z1) * (y3 - y1);
+        float normalY = (z2 - z1) * (x3 - x1) - (x2 - x1) * (z3 - z1);
+        float normalZ = (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1);
 
-        VERTEX_DATA[0] = Float.intBitsToFloat(vertices[16]);
-        VERTEX_DATA[1] = Float.intBitsToFloat(vertices[17]);
-        VERTEX_DATA[2] = Float.intBitsToFloat(vertices[18]);
-        float x3 = VERTEX_DATA[0], y3 = VERTEX_DATA[1], z3 = VERTEX_DATA[2];
+        // Transform normal using optimized helper
+        float transformedNX = MatrixHelper.transformNormalX(normalMatrix, normalX, normalY, normalZ);
+        float transformedNY = MatrixHelper.transformNormalY(normalMatrix, normalX, normalY, normalZ);
+        float transformedNZ = MatrixHelper.transformNormalZ(normalMatrix, normalX, normalY, normalZ);
 
-        // Calculate edges and cross product in single step
-        NORMAL_VEC.set(
-                (y2 - y1) * (z3 - z1) - (z2 - z1) * (y3 - y1),
-                (z2 - z1) * (x3 - x1) - (x2 - x1) * (z3 - z1),
-                (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1)
-        );
+        // Transform position using optimized helper
+        float transformedX = MatrixHelper.transformPositionX(modelViewMatrix, x1, y1, z1);
+        float transformedY = MatrixHelper.transformPositionY(modelViewMatrix, x1, y1, z1);
+        float transformedZ = MatrixHelper.transformPositionZ(modelViewMatrix, x1, y1, z1);
 
-        normalMatrix.transform(NORMAL_VEC);
-        VERTEX_POS.set(x1, y1, z1);
-        modelViewMatrix.transformPosition(VERTEX_POS);
-
-        return NORMAL_VEC.dot(-VERTEX_POS.x, -VERTEX_POS.y, -VERTEX_POS.z) < 0.0f;
+        // Final dot product
+        return (transformedNX * -transformedX +
+                transformedNY * -transformedY +
+                transformedNZ * -transformedZ) < 0.0f;
     }
 
 
