@@ -28,6 +28,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import net.minecraft.client.renderer.MultiBufferSource;
+import sun.misc.Unsafe;
+
+import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.List;
 
 @Mixin(ItemRenderer.class)
@@ -159,6 +163,25 @@ public class ItemRendererMixin {
     }
 
     @Unique
+    private static final sun.misc.Unsafe UNSAFE;
+    @Unique
+    private static final long ARRAY_LIST_ELEMENT_DATA_OFFSET;
+
+    static {
+        try {
+            Field theUnsafe = Unsafe.class.getDeclaredField("theUnsafe");
+            theUnsafe.setAccessible(true);
+            UNSAFE = (Unsafe) theUnsafe.get(null);
+
+            // Get the offset of elementData field in ArrayList
+            Field elementDataField = ArrayList.class.getDeclaredField("elementData");
+            ARRAY_LIST_ELEMENT_DATA_OFFSET = UNSAFE.objectFieldOffset(elementDataField);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to initialize Unsafe access", e);
+        }
+    }
+
+    @Unique
     private void renderBakedItemQuads(PoseStack.Pose matrices, VertexBufferWriter writer, List<BakedQuad> quads, ItemStack itemStack, ItemColor colorProvider, int light, int overlay) {
         final int quadCount = quads.size();
         if (quadCount == 0) return;
@@ -166,32 +189,114 @@ public class ItemRendererMixin {
         final boolean shouldMultiplyAlpha = BakedModelEncoder.shouldMultiplyAlpha();
         final int defaultColor = 0xFFFFFFFF;
 
-        if (colorProvider == null) {
-            for (int i = 0; i < quadCount; i++) {
-                BakedQuad bakedQuad = quads.get(i);
-                if (bakedQuad.getVertices().length < 32) continue;
+        // Direct access to ArrayList's internal array
+        final Object[] rawQuads = (Object[]) UNSAFE.getObject(quads, ARRAY_LIST_ELEMENT_DATA_OFFSET);
 
-                if (!isFacingAway(matrices, bakedQuad)) {
-                    BakedQuadView quad = (BakedQuadView) bakedQuad;
-                    BakedModelEncoder.writeQuadVertices(writer, matrices, quad, defaultColor, light, overlay, shouldMultiplyAlpha);
-                    SpriteUtil.markSpriteActive(quad.getSprite());
+        // These lines were removed as the matrices are already available in the passed matrices parameter
+
+        if (colorProvider == null) {
+            // Loop unrolling for non-colored path
+            int i = 0;
+            final int quadLimit = quadCount - 3;
+
+            for (; i < quadLimit; i += 4) {
+                // Touch next iteration's memory to help with prefetching
+                if (i + 8 < quadCount) {
+                    UNSAFE.getObject(rawQuads, Unsafe.ARRAY_OBJECT_BASE_OFFSET + ((i + 4) << 3));
+                    UNSAFE.getObject(rawQuads, Unsafe.ARRAY_OBJECT_BASE_OFFSET + ((i + 5) << 3));
+                }
+
+                // Process current quads in parallel-friendly way
+                BakedQuad quad1 = (BakedQuad) rawQuads[i];
+                BakedQuad quad2 = (BakedQuad) rawQuads[i + 1];
+                BakedQuad quad3 = (BakedQuad) rawQuads[i + 2];
+                BakedQuad quad4 = (BakedQuad) rawQuads[i + 3];
+
+                // Process quad1 immediately to utilize cache
+                if (quad1.getVertices().length >= 32 && !isFacingAway(matrices, quad1)) {
+                    BakedQuadView view = (BakedQuadView) quad1;
+                    BakedModelEncoder.writeQuadVertices(writer, matrices, view, defaultColor, light, overlay, shouldMultiplyAlpha);
+                    SpriteUtil.markSpriteActive(view.getSprite());
+                }
+
+                // Process quad2 while quad1's writes are in flight
+                if (quad2.getVertices().length >= 32 && !isFacingAway(matrices, quad2)) {
+                    BakedQuadView view = (BakedQuadView) quad2;
+                    BakedModelEncoder.writeQuadVertices(writer, matrices, view, defaultColor, light, overlay, shouldMultiplyAlpha);
+                    SpriteUtil.markSpriteActive(view.getSprite());
+                }
+
+                // Process quad3 while quad2's writes are in flight
+                if (quad3.getVertices().length >= 32 && !isFacingAway(matrices, quad3)) {
+                    BakedQuadView view = (BakedQuadView) quad3;
+                    BakedModelEncoder.writeQuadVertices(writer, matrices, view, defaultColor, light, overlay, shouldMultiplyAlpha);
+                    SpriteUtil.markSpriteActive(view.getSprite());
+                }
+
+                // Process quad4 while quad3's writes are in flight
+                if (quad4.getVertices().length >= 32 && !isFacingAway(matrices, quad4)) {
+                    BakedQuadView view = (BakedQuadView) quad4;
+                    BakedModelEncoder.writeQuadVertices(writer, matrices, view, defaultColor, light, overlay, shouldMultiplyAlpha);
+                    SpriteUtil.markSpriteActive(view.getSprite());
+                }
+            }
+
+            // Handle remaining quads
+            for (; i < quadCount; i++) {
+                BakedQuad quad = (BakedQuad) rawQuads[i];
+                if (quad.getVertices().length >= 32 && !isFacingAway(matrices, quad)) {
+                    BakedQuadView view = (BakedQuadView) quad;
+                    BakedModelEncoder.writeQuadVertices(writer, matrices, view, defaultColor, light, overlay, shouldMultiplyAlpha);
+                    SpriteUtil.markSpriteActive(view.getSprite());
                 }
             }
             return;
         }
 
-        for (int i = 0; i < quadCount; i++) {
-            BakedQuad bakedQuad = quads.get(i);
-            if (bakedQuad.getVertices().length < 32) continue;
+        // Colored path
+        int i = 0;
+        final int pairLimit = quadCount - 1;
 
-            if (!isFacingAway(matrices, bakedQuad)) {
-                BakedQuadView quad = (BakedQuadView) bakedQuad;
-                int color = quad.hasColor()
-                        ? ColorARGB.toABGR(colorProvider.getColor(itemStack, quad.getColorIndex()))
+        for (; i < pairLimit; i += 2) {
+            // Touch next iteration's memory to help with prefetching
+            if (i + 4 < quadCount) {
+                UNSAFE.getObject(rawQuads, Unsafe.ARRAY_OBJECT_BASE_OFFSET + ((i + 2) << 3));
+            }
+
+            BakedQuad quad1 = (BakedQuad) rawQuads[i];
+            BakedQuad quad2 = (BakedQuad) rawQuads[i + 1];
+
+            // Process first quad immediately
+            if (quad1.getVertices().length >= 32 && !isFacingAway(matrices, quad1)) {
+                BakedQuadView view = (BakedQuadView) quad1;
+                int color = view.hasColor()
+                        ? ColorARGB.toABGR(colorProvider.getColor(itemStack, view.getColorIndex()))
                         : defaultColor;
+                BakedModelEncoder.writeQuadVertices(writer, matrices, view, color, light, overlay, shouldMultiplyAlpha);
+                SpriteUtil.markSpriteActive(view.getSprite());
+            }
 
-                BakedModelEncoder.writeQuadVertices(writer, matrices, quad, color, light, overlay, shouldMultiplyAlpha);
-                SpriteUtil.markSpriteActive(quad.getSprite());
+            // Process second quad while first is in flight
+            if (quad2.getVertices().length >= 32 && !isFacingAway(matrices, quad2)) {
+                BakedQuadView view = (BakedQuadView) quad2;
+                int color = view.hasColor()
+                        ? ColorARGB.toABGR(colorProvider.getColor(itemStack, view.getColorIndex()))
+                        : defaultColor;
+                BakedModelEncoder.writeQuadVertices(writer, matrices, view, color, light, overlay, shouldMultiplyAlpha);
+                SpriteUtil.markSpriteActive(view.getSprite());
+            }
+        }
+
+        // Handle remaining quad
+        if (i < quadCount) {
+            BakedQuad quad = (BakedQuad) rawQuads[i];
+            if (quad.getVertices().length >= 32 && !isFacingAway(matrices, quad)) {
+                BakedQuadView view = (BakedQuadView) quad;
+                int color = view.hasColor()
+                        ? ColorARGB.toABGR(colorProvider.getColor(itemStack, view.getColorIndex()))
+                        : defaultColor;
+                BakedModelEncoder.writeQuadVertices(writer, matrices, view, color, light, overlay, shouldMultiplyAlpha);
+                SpriteUtil.markSpriteActive(view.getSprite());
             }
         }
     }
