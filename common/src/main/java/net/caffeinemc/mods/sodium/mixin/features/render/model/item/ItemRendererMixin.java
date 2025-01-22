@@ -49,34 +49,38 @@ public class ItemRendererMixin {
             return false;
         }
 
-        int[] vertices = quad.getVertices();
+        final int[] vertices = quad.getVertices();
         if (vertices.length < 32) {
             return false;
         }
 
-        // Pre-fetch matrix references once
-        Matrix4f modelViewMatrix = matrices.pose();
-        Matrix3f normalMatrix = matrices.normal();
+        // Pre-fetch matrix references and cache commonly used values
+        final Matrix4f modelViewMatrix = matrices.pose();
+        final Matrix3f normalMatrix = matrices.normal();
+
+        final float x = Float.intBitsToFloat(vertices[0]);
+        final float y = Float.intBitsToFloat(vertices[1]);
+        final float z = Float.intBitsToFloat(vertices[2]);
+
+        // Transform vertex position once and cache results
+        final float transformedX = MatrixHelper.transformPositionX(modelViewMatrix, x, y, z);
+        final float transformedY = MatrixHelper.transformPositionY(modelViewMatrix, x, y, z);
+        final float transformedZ = MatrixHelper.transformPositionZ(modelViewMatrix, x, y, z);
 
         // Fast path: Use existing normal if available
+        // Read normal from first vertex
         float nx = Float.intBitsToFloat(vertices[6]);
         float ny = Float.intBitsToFloat(vertices[7]);
         float nz = Float.intBitsToFloat(vertices[14]);
 
-        if (nx != 0 || ny != 0 || nz != 0) {
-            // Transform position using optimized helper
-            float x = Float.intBitsToFloat(vertices[0]);
-            float y = Float.intBitsToFloat(vertices[1]);
-            float z = Float.intBitsToFloat(vertices[2]);
+        // Check if we have a valid normal (non-zero)
+        final boolean hasValidNormal = (nx != 0.0f || ny != 0.0f || nz != 0.0f);
 
-            float transformedX = MatrixHelper.transformPositionX(modelViewMatrix, x, y, z);
-            float transformedY = MatrixHelper.transformPositionY(modelViewMatrix, x, y, z);
-            float transformedZ = MatrixHelper.transformPositionZ(modelViewMatrix, x, y, z);
-
-            // Transform normal using optimized helper
-            float transformedNX = MatrixHelper.transformNormalX(normalMatrix, nx, ny, nz);
-            float transformedNY = MatrixHelper.transformNormalY(normalMatrix, nx, ny, nz);
-            float transformedNZ = MatrixHelper.transformNormalZ(normalMatrix, nx, ny, nz);
+        if (hasValidNormal) {
+            // Transform and normalize the normal vector in one pass
+            final float transformedNX = MatrixHelper.transformNormalX(normalMatrix, nx, ny, nz);
+            final float transformedNY = MatrixHelper.transformNormalY(normalMatrix, nx, ny, nz);
+            final float transformedNZ = MatrixHelper.transformNormalZ(normalMatrix, nx, ny, nz);
 
             // Single dot product calculation
             return (transformedNX * -transformedX +
@@ -84,33 +88,25 @@ public class ItemRendererMixin {
                     transformedNZ * -transformedZ) < 0.0f;
         }
 
-        // Slow path: Calculate face normal
-        float x1 = Float.intBitsToFloat(vertices[0]);
-        float y1 = Float.intBitsToFloat(vertices[1]);
-        float z1 = Float.intBitsToFloat(vertices[2]);
-        float x2 = Float.intBitsToFloat(vertices[8]);
-        float y2 = Float.intBitsToFloat(vertices[9]);
-        float z2 = Float.intBitsToFloat(vertices[10]);
-        float x3 = Float.intBitsToFloat(vertices[16]);
-        float y3 = Float.intBitsToFloat(vertices[17]);
-        float z3 = Float.intBitsToFloat(vertices[18]);
+        // Slow path: Calculate face normal from three vertices
+        final float x2 = Float.intBitsToFloat(vertices[8]);
+        final float y2 = Float.intBitsToFloat(vertices[9]);
+        final float z2 = Float.intBitsToFloat(vertices[10]);
+        final float x3 = Float.intBitsToFloat(vertices[16]);
+        final float y3 = Float.intBitsToFloat(vertices[17]);
+        final float z3 = Float.intBitsToFloat(vertices[18]);
 
-        // Calculate normal components directly
-        float normalX = (y2 - y1) * (z3 - z1) - (z2 - z1) * (y3 - y1);
-        float normalY = (z2 - z1) * (x3 - x1) - (x2 - x1) * (z3 - z1);
-        float normalZ = (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1);
+        // Calculate normal using cross product with minimal temporary variables
+        final float normalX = (y2 - y) * (z3 - z) - (z2 - z) * (y3 - y);
+        final float normalY = (z2 - z) * (x3 - x) - (x2 - x) * (z3 - z);
+        final float normalZ = (x2 - x) * (y3 - y) - (y2 - y) * (x3 - x);
 
-        // Transform normal using optimized helper
-        float transformedNX = MatrixHelper.transformNormalX(normalMatrix, normalX, normalY, normalZ);
-        float transformedNY = MatrixHelper.transformNormalY(normalMatrix, normalX, normalY, normalZ);
-        float transformedNZ = MatrixHelper.transformNormalZ(normalMatrix, normalX, normalY, normalZ);
+        // Transform the calculated normal
+        final float transformedNX = MatrixHelper.transformNormalX(normalMatrix, normalX, normalY, normalZ);
+        final float transformedNY = MatrixHelper.transformNormalY(normalMatrix, normalX, normalY, normalZ);
+        final float transformedNZ = MatrixHelper.transformNormalZ(normalMatrix, normalX, normalY, normalZ);
 
-        // Transform position using optimized helper
-        float transformedX = MatrixHelper.transformPositionX(modelViewMatrix, x1, y1, z1);
-        float transformedY = MatrixHelper.transformPositionY(modelViewMatrix, x1, y1, z1);
-        float transformedZ = MatrixHelper.transformPositionZ(modelViewMatrix, x1, y1, z1);
-
-        // Final dot product
+        // Final dot product using already transformed position
         return (transformedNX * -transformedX +
                 transformedNY * -transformedY +
                 transformedNZ * -transformedZ) < 0.0f;
