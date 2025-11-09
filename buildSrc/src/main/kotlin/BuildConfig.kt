@@ -21,8 +21,7 @@ object BuildConfig {
         if (isReleaseBuild) {
             builder.append(MOD_VERSION)
         } else {
-            builder.append(MOD_VERSION.substringBefore('-'))
-            builder.append("-snapshot")
+            builder.append(MOD_VERSION)
         }
 
         builder.append("+mc").append(MINECRAFT_VERSION)
@@ -31,7 +30,7 @@ object BuildConfig {
             if (buildId != null) {
                 builder.append("-build.${buildId}")
             } else {
-                builder.append("-local")
+                builder.append("-build")
             }
         }
 

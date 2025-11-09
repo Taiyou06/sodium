@@ -4,9 +4,12 @@ import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import net.caffeinemc.mods.sodium.api.math.MatrixHelper;
 import net.caffeinemc.mods.sodium.api.texture.SpriteUtil;
 import net.caffeinemc.mods.sodium.api.util.ColorARGB;
+import net.caffeinemc.mods.sodium.api.util.ColorMixer;
 import net.caffeinemc.mods.sodium.api.vertex.buffer.VertexBufferWriter;
+import net.caffeinemc.mods.sodium.api.vertex.format.common.EntityVertex;
 import net.caffeinemc.mods.sodium.client.model.quad.BakedQuadView;
 import net.caffeinemc.mods.sodium.client.render.immediate.model.BakedModelEncoder;
 import net.caffeinemc.mods.sodium.client.render.vertex.VertexConsumerUtils;
@@ -16,6 +19,9 @@ import net.minecraft.client.renderer.entity.ItemRenderer;
 import net.minecraft.core.Direction;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.levelgen.SingleThreadedRandomSource;
+import org.joml.Matrix3f;
+import org.joml.Matrix4f;
+import org.lwjgl.system.MemoryStack;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
@@ -54,26 +60,90 @@ public abstract class ItemRendererMixin {
 
     @Unique
     @SuppressWarnings("ForLoopReplaceableByForEach")
-    private static void renderBakedItemQuads(PoseStack.Pose matrices, VertexBufferWriter writer, List<BakedQuad> quads, int[] colors, int light, int overlay) {
-        for (int i = 0; i < quads.size(); i++) {
-            BakedQuad bakedQuad = quads.get(i);
+    private static void renderBakedItemQuads(PoseStack.Pose matrices, VertexBufferWriter writer,
+                                             List<BakedQuad> quads, int[] colors, int light, int overlay) {
+        // Cache frequently accessed values to reduce indirection
+        final int quadCount = quads.size();
+        if (quadCount == 0) return;
 
-            if (bakedQuad.vertices().length < 32) {
-                continue; // ignore bad quads
+        final boolean multiplyAlpha = BakedModelEncoder.shouldMultiplyAlpha();
+        final Matrix3f matNormal = matrices.normal();
+        final Matrix4f matPosition = matrices.pose();
+        final boolean trustedNormals = matrices.trustedNormals;
+
+        // Process quads in batches to amortize MemoryStack overhead
+        final int batchSize = Math.min(quadCount, 16);
+
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            long batchBuffer = stack.nmalloc(batchSize * 4 * EntityVertex.STRIDE);
+            long ptr = batchBuffer;
+            int batchedQuads = 0;
+
+            for (int i = 0; i < quadCount; i++) {
+                BakedQuad bakedQuad = quads.get(i);
+
+                // Fast-path skip for invalid quads
+                if (bakedQuad.vertices().length < 32) continue;
+
+                // Single cast for the quad view
+                BakedQuadView quad = (BakedQuadView) (Object) bakedQuad;
+
+                // Resolve tint color once per quad
+                int quadColor = 0xFFFFFFFF;
+                if (bakedQuad.isTinted()) {
+                    int tintIndex = bakedQuad.tintIndex();
+                    // Bounds check without method call overhead
+                    if (tintIndex >= 0 && tintIndex < colors.length) {
+                        quadColor = ColorARGB.toABGR(colors[tintIndex]);
+                    }
+                }
+
+                // Inline writeQuadVertices logic for direct batching
+                for (int vi = 0; vi < 4; vi++) {
+                    final float x = quad.getX(vi);
+                    final float y = quad.getY(vi);
+                    final float z = quad.getZ(vi);
+
+                    // Inlined mergeLighting to avoid method call
+                    final int maxLight = quad.getMaxLightQuad(vi);
+                    final int newLight = (maxLight == 0) ? light :
+                            (Math.max(maxLight & 0xFFFF, light & 0xFFFF) |
+                                    (Math.max((maxLight >> 16) & 0xFFFF, (light >> 16) & 0xFFFF) << 16));
+
+                    int finalColor = quadColor;
+                    if (multiplyAlpha) {
+                        finalColor = ColorMixer.mulComponentWise(finalColor, quad.getColor(vi));
+                    }
+
+                    final int normal = MatrixHelper.transformNormal(matNormal, trustedNormals, quad.getAccurateNormal(vi));
+                    final float xt = MatrixHelper.transformPositionX(matPosition, x, y, z);
+                    final float yt = MatrixHelper.transformPositionY(matPosition, x, y, z);
+                    final float zt = MatrixHelper.transformPositionZ(matPosition, x, y, z);
+
+                    EntityVertex.write(ptr, xt, yt, zt, finalColor, quad.getTexU(vi), quad.getTexV(vi),
+                            overlay, newLight, normal);
+                    ptr += EntityVertex.STRIDE;
+                }
+
+                batchedQuads++;
+
+                // Flush batch when full
+                if (batchedQuads == batchSize) {
+                    writer.push(stack, batchBuffer, batchedQuads * 4, EntityVertex.FORMAT);
+                    batchedQuads = 0;
+                    ptr = batchBuffer;
+                }
+
+                // Mark sprite active (moved outside inner loop)
+                var sprite = quad.getSprite();
+                if (sprite != null) {
+                    SpriteUtil.INSTANCE.markSpriteActive(sprite);
+                }
             }
 
-            BakedQuadView quad = (BakedQuadView) (Object) bakedQuad;
-
-            int color = 0xFFFFFFFF;
-
-            if (bakedQuad.isTinted()) {
-                color = ColorARGB.toABGR(getLayerColorSafe(colors, bakedQuad.tintIndex()));
-            }
-
-            BakedModelEncoder.writeQuadVertices(writer, matrices, quad, color, light, overlay, BakedModelEncoder.shouldMultiplyAlpha());
-
-            if (quad.getSprite() != null) {
-                SpriteUtil.INSTANCE.markSpriteActive(quad.getSprite());
+            // Flush final batch
+            if (batchedQuads > 0) {
+                writer.push(stack, batchBuffer, batchedQuads * 4, EntityVertex.FORMAT);
             }
         }
     }

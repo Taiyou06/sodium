@@ -24,38 +24,72 @@ public class BakedModelEncoder {
 
     private static final boolean MULTIPLY_ALPHA = PlatformRuntimeInformation.getInstance().usesAlphaMultiplication();
 
-    public static void writeQuadVertices(VertexBufferWriter writer, PoseStack.Pose matrices, ModelQuadView quad, int color, int light, int overlay, boolean colorize) {
-        Matrix3f matNormal = matrices.normal();
-        Matrix4f matPosition = matrices.pose();
+    public static void writeQuadVertices(VertexBufferWriter writer, PoseStack.Pose matrices,
+                                         ModelQuadView quad, int color, int light, int overlay, boolean colorize) {
+        // Cache matrix state locally for register efficiency
+        final Matrix3f matNormal = matrices.normal();
+        final Matrix4f matPosition = matrices.pose();
+        final boolean trustedNormals = matrices.trustedNormals;
 
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            long buffer = stack.nmalloc(4 * EntityVertex.STRIDE);
+            final long buffer = stack.nmalloc(4 * EntityVertex.STRIDE);
             long ptr = buffer;
 
+            // Pre-load quad data into locals to avoid repeated method calls
+            // and improve cache locality
+            float[] posX = new float[4];
+            float[] posY = new float[4];
+            float[] posZ = new float[4];
+            int[] colors = new int[4];
+            int[] maxLights = new int[4];
+            int[] normals = new int[4];
+            float[] texU = new float[4];
+            float[] texV = new float[4];
+
+            // Single pass to extract all vertex data
             for (int i = 0; i < 4; i++) {
-                // The position vector
-                float x = quad.getX(i);
-                float y = quad.getY(i);
-                float z = quad.getZ(i);
+                posX[i] = quad.getX(i);
+                posY[i] = quad.getY(i);
+                posZ[i] = quad.getZ(i);
+                colors[i] = quad.getColor(i);
+                maxLights[i] = quad.getMaxLightQuad(i);
+                normals[i] = quad.getAccurateNormal(i);
+                texU[i] = quad.getTexU(i);
+                texV[i] = quad.getTexV(i);
+            }
 
-                int newLight = mergeLighting(quad.getMaxLightQuad(i), light);
+            // Process vertices with minimal branching
+            if (colorize) {
+                // Colorize path
+                for (int i = 0; i < 4; i++) {
+                    final int newLight = (maxLights[i] == 0) ? light :
+                            (Math.max(maxLights[i] & 0xFFFF, light & 0xFFFF) |
+                                    (Math.max((maxLights[i] >> 16) & 0xFFFF, (light >> 16) & 0xFFFF) << 16));
 
-                int newColor = color;
+                    final int finalColor = ColorMixer.mulComponentWise(color, colors[i]);
+                    final int normal = MatrixHelper.transformNormal(matNormal, trustedNormals, normals[i]);
+                    final float xt = MatrixHelper.transformPositionX(matPosition, posX[i], posY[i], posZ[i]);
+                    final float yt = MatrixHelper.transformPositionY(matPosition, posX[i], posY[i], posZ[i]);
+                    final float zt = MatrixHelper.transformPositionZ(matPosition, posX[i], posY[i], posZ[i]);
 
-                if (colorize) {
-                    newColor = ColorMixer.mulComponentWise(newColor, quad.getColor(i));
+                    EntityVertex.write(ptr, xt, yt, zt, finalColor, texU[i], texV[i], overlay, newLight, normal);
+                    ptr += EntityVertex.STRIDE;
                 }
+            } else {
+                // Non-colorize path - reduced computation
+                for (int i = 0; i < 4; i++) {
+                    final int newLight = (maxLights[i] == 0) ? light :
+                            (Math.max(maxLights[i] & 0xFFFF, light & 0xFFFF) |
+                                    (Math.max((maxLights[i] >> 16) & 0xFFFF, (light >> 16) & 0xFFFF) << 16));
 
-                // The packed transformed normal vector
-                int normal = MatrixHelper.transformNormal(matNormal, matrices.trustedNormals, quad.getAccurateNormal(i));
+                    final int normal = MatrixHelper.transformNormal(matNormal, trustedNormals, normals[i]);
+                    final float xt = MatrixHelper.transformPositionX(matPosition, posX[i], posY[i], posZ[i]);
+                    final float yt = MatrixHelper.transformPositionY(matPosition, posX[i], posY[i], posZ[i]);
+                    final float zt = MatrixHelper.transformPositionZ(matPosition, posX[i], posY[i], posZ[i]);
 
-                // The transformed position vector
-                float xt = MatrixHelper.transformPositionX(matPosition, x, y, z);
-                float yt = MatrixHelper.transformPositionY(matPosition, x, y, z);
-                float zt = MatrixHelper.transformPositionZ(matPosition, x, y, z);
-
-                EntityVertex.write(ptr, xt, yt, zt, newColor, quad.getTexU(i), quad.getTexV(i), overlay, newLight, normal);
-                ptr += EntityVertex.STRIDE;
+                    EntityVertex.write(ptr, xt, yt, zt, color, texU[i], texV[i], overlay, newLight, normal);
+                    ptr += EntityVertex.STRIDE;
+                }
             }
 
             writer.push(stack, buffer, 4, EntityVertex.FORMAT);
