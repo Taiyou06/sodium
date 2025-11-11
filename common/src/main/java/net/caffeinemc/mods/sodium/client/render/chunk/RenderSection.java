@@ -337,8 +337,19 @@ public class RenderSection {
     }
 
     private static int generateAngles(int rise, int run) {
-        double minAngle = Math.atan2(rise - 1, run + 1);
-        double maxAngle = Math.atan2(rise + 1, run - 1);
+        // The original code used offsets of +/- 1.0. In chunk coordinates, 1.0 represents
+        // a full chunk width (16 blocks). This created a massive safety margin of 8 blocks
+        // on every side (0.5 actual width + 0.5 extra margin), allowing visibility to leak
+        // through diagonal gaps and causing over-rendering.
+        //
+        // We reduce this offset to 0.75.
+        // 0.5 covers the actual physical chunk.
+        // 0.25 adds a safety margin of 4 blocks for entities/models extending outside the chunk.
+        // This significantly tightens the visibility cone without causing pop-in.
+        double margin = 0.75;
+
+        double minAngle = Math.atan2(rise - margin, run + margin);
+        double maxAngle = Math.atan2(rise + margin, run - margin);
 
         // Quantize angles to 10-bit range [0, 1023]
         int minQuant = (int) (Math.max(0.0, minAngle) * (ANGLE_MASK / (Math.PI / 2.0)));
