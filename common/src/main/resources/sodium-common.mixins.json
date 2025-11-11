@@ -103,6 +103,7 @@
     "workarounds.context_creation.WindowMixin",
     "workarounds.context_creation.RenderSystemMixin",
     "workarounds.event_loop.RenderSystemMixin",
-    "features.render.model.BlockSetTypeMixin"
+    "features.render.model.BlockSetTypeMixin",
+    "core.render.frustum.MixinFrustumIntersection"
   ]
 }
