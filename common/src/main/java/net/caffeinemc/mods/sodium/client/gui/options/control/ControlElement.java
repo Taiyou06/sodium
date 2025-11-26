@@ -1,50 +1,48 @@
 package net.caffeinemc.mods.sodium.client.gui.options.control;
 
-import net.caffeinemc.mods.sodium.client.config.structure.Option;
-import net.caffeinemc.mods.sodium.client.gui.ColorTheme;
-import net.caffeinemc.mods.sodium.client.gui.Colors;
-import net.caffeinemc.mods.sodium.client.gui.Layout;
+import com.mojang.blaze3d.platform.cursor.CursorTypes;
+import net.caffeinemc.mods.sodium.client.gui.options.Option;
 import net.caffeinemc.mods.sodium.client.gui.widgets.AbstractWidget;
 import net.caffeinemc.mods.sodium.client.util.Dim2i;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.ComponentPath;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.navigation.FocusNavigationEvent;
-import net.minecraft.network.chat.Component;
-import net.minecraft.network.chat.MutableComponent;
-import net.minecraft.network.chat.Style;
+import net.minecraft.client.gui.navigation.ScreenRectangle;
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-public abstract class ControlElement extends AbstractWidget {
-    protected final AbstractOptionList list;
-    protected final ColorTheme theme;
+public class ControlElement<T> extends AbstractWidget {
+    protected final Option<T> option;
 
-    public ControlElement(AbstractOptionList list, Dim2i dim, ColorTheme theme) {
-        super(dim);
-        this.list = list;
-        this.theme = theme;
+    protected final Dim2i dim;
+
+    public ControlElement(Option<T> option, Dim2i dim) {
+        this.option = option;
+        this.dim = dim;
     }
 
-    public abstract Option getOption();
-
     public int getContentWidth() {
-        return this.getOption().getControl().getMaxWidth();
+        return this.option.getControl().getMaxWidth();
     }
 
     @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float delta) {
-        String name = this.getOption().getName().getString();
+        String name = this.option.getName().getString();
 
         // add the star suffix before truncation to prevent it from overlapping with the label text
-        if (this.getOption().isEnabled() && this.getOption().hasChanged()) {
+        if (this.option.isAvailable() && this.option.hasChanged()) {
             name = name + " *";
         }
 
-        name = truncateLabelToFit(name);
+        // on focus or hover truncate the label to never overlap with the control's content
+        if (this.hovered || this.isFocused()) {
+            name = truncateLabelToFit(name);
+        }
 
         String label;
-        if (this.getOption().isEnabled()) {
-            if (this.getOption().hasChanged()) {
+        if (this.option.isAvailable()) {
+            if (this.option.hasChanged()) {
                 label = ChatFormatting.ITALIC + name;
             } else {
                 label = ChatFormatting.WHITE + name;
@@ -53,36 +51,69 @@ public abstract class ControlElement extends AbstractWidget {
             label = String.valueOf(ChatFormatting.GRAY) + ChatFormatting.STRIKETHROUGH + name;
         }
 
-        this.hovered = this.isMouseOver(mouseX, mouseY);
+        this.hovered = this.dim.containsCursor(mouseX, mouseY);
 
-        this.drawRect(graphics, this.getX(), this.getY(), this.getLimitX(), this.getLimitY(), this.hovered ? Colors.BACKGROUND_HOVER : Colors.BACKGROUND_LIGHT);
-        this.drawString(graphics, label, this.getX() + 6, this.getCenterY() + Layout.REGULAR_TEXT_BASELINE_OFFSET, Colors.FOREGROUND);
+        if (hovered) {
+            graphics.requestCursor(this.option.isAvailable() ? CursorTypes.POINTING_HAND : CursorTypes.NOT_ALLOWED);
+        }
+
+        this.drawRect(graphics, this.dim.x(), this.dim.y(), this.dim.getLimitX(), this.dim.getLimitY(), this.hovered ? 0xE0000000 : 0x90000000);
+        this.drawString(graphics, label, this.dim.x() + 6, this.dim.getCenterY() - 4, 0xFFFFFFFF);
 
         if (this.isFocused()) {
-            this.drawBorder(graphics, this.getX(), this.getY(), this.getLimitX(), this.getLimitY(), -1);
+            this.drawBorder(graphics, this.dim.x(), this.dim.y(), this.dim.getLimitX(), this.dim.getLimitY(), -1);
         }
     }
 
-    protected MutableComponent formatDisabledControlValue(Component value) {
-        return value.copy().withStyle(Style.EMPTY
-                .withColor(ChatFormatting.GRAY)
-                .withItalic(true));
+    private @NotNull String truncateLabelToFit(String name) {
+        var suffix = "...";
+        var suffixWidth = this.font.width(suffix);
+        var nameFontWidth = this.font.width(name);
+        var targetWidth = this.dim.width() - this.getContentWidth() - 20;
+        if (nameFontWidth > targetWidth) {
+            targetWidth -= suffixWidth;
+            int maxLabelChars = name.length() - 3;
+            int minLabelChars = 1;
+
+            // binary search on how many chars fit
+            while (maxLabelChars - minLabelChars > 1) {
+                var mid = (maxLabelChars + minLabelChars) / 2;
+                var midName = name.substring(0, mid);
+                var midWidth = this.font.width(midName);
+                if (midWidth > targetWidth) {
+                    maxLabelChars = mid;
+                } else {
+                    minLabelChars = mid;
+                }
+            }
+
+            name = name.substring(0, minLabelChars).trim() + suffix;
+        }
+        return name;
     }
 
-    private String truncateLabelToFit(String name) {
-        return truncateTextToFit(name, this.getWidth() - this.getContentWidth() - 20);
+    public Option<T> getOption() {
+        return this.option;
     }
 
-    @Override
-    public int getY() {
-        return super.getY() - this.list.getScrollAmount();
+    public Dim2i getDimensions() {
+        return this.dim;
     }
 
     @Override
     public @Nullable ComponentPath nextFocusPath(FocusNavigationEvent event) {
-        if (!this.getOption().isEnabled()) {
+        if (!this.option.isAvailable())
             return null;
-        }
         return super.nextFocusPath(event);
+    }
+
+    @Override
+    public ScreenRectangle getRectangle() {
+        return new ScreenRectangle(this.dim.x(), this.dim.y(), this.dim.width(), this.dim.height());
+    }
+
+    @Override
+    public boolean isMouseOver(double x, double y) {
+        return this.dim.containsCursor(x, y);
     }
 }

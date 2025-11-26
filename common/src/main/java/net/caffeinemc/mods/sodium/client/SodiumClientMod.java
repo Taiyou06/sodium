@@ -1,29 +1,31 @@
 package net.caffeinemc.mods.sodium.client;
 
-import net.caffeinemc.mods.sodium.client.config.ConfigManager;
 import net.caffeinemc.mods.sodium.client.console.Console;
 import net.caffeinemc.mods.sodium.client.console.message.MessageLevel;
 import net.caffeinemc.mods.sodium.client.data.fingerprint.FingerprintMeasure;
 import net.caffeinemc.mods.sodium.client.data.fingerprint.HashedFingerprint;
-import net.caffeinemc.mods.sodium.client.gui.SodiumOptions;
+import net.caffeinemc.mods.sodium.client.gui.SodiumDebugEntry;
+import net.caffeinemc.mods.sodium.client.gui.SodiumGameOptions;
 import net.caffeinemc.mods.sodium.client.services.PlatformRuntimeInformation;
+import net.caffeinemc.mods.sodium.mixin.features.gui.hooks.debug.DebugScreenEntriesAccessor;
+import net.minecraft.client.gui.components.debug.DebugScreenEntries;
+import net.minecraft.resources.ResourceLocation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 
 public class SodiumClientMod {
-    private static SodiumOptions OPTIONS;
+    private static SodiumGameOptions CONFIG;
     private static final Logger LOGGER = LoggerFactory.getLogger("Sodium");
 
     private static String MOD_VERSION;
 
     public static void onInitialization(String version) {
+        DebugScreenEntriesAccessor.getEntries().put(ResourceLocation.fromNamespaceAndPath("sodium", "sodium"), new SodiumDebugEntry());
         MOD_VERSION = version;
 
-        OPTIONS = loadConfig();
-
-        ConfigManager.registerConfigsEarly();
+        CONFIG = loadConfig();
 
         try {
             updateFingerprint();
@@ -32,12 +34,12 @@ public class SodiumClientMod {
         }
     }
 
-    public static SodiumOptions options() {
-        if (OPTIONS == null) {
+    public static SodiumGameOptions options() {
+        if (CONFIG == null) {
             throw new IllegalStateException("Config not yet available");
         }
 
-        return OPTIONS;
+        return CONFIG;
     }
 
     public static Logger logger() {
@@ -48,16 +50,16 @@ public class SodiumClientMod {
         return LOGGER;
     }
 
-    private static SodiumOptions loadConfig() {
+    private static SodiumGameOptions loadConfig() {
         try {
-            return SodiumOptions.loadFromDisk();
+            return SodiumGameOptions.loadFromDisk();
         } catch (Exception e) {
             LOGGER.error("Failed to load configuration file", e);
             LOGGER.error("Using default configuration file in read-only mode");
 
             Console.instance().logMessage(MessageLevel.SEVERE, "sodium.console.config_not_loaded", true, 12.5);
 
-            var config = SodiumOptions.defaults();
+            var config = SodiumGameOptions.defaults();
             config.setReadOnly();
 
             return config;
@@ -65,10 +67,10 @@ public class SodiumClientMod {
     }
 
     public static void restoreDefaultOptions() {
-        OPTIONS = SodiumOptions.defaults();
+        CONFIG = SodiumGameOptions.defaults();
 
         try {
-            SodiumOptions.writeToDisk(OPTIONS);
+            SodiumGameOptions.writeToDisk(CONFIG);
         } catch (IOException e) {
             throw new RuntimeException("Failed to write config file", e);
         }
@@ -100,11 +102,11 @@ public class SodiumClientMod {
         if (saved == null || !current.looselyMatches(saved)) {
             HashedFingerprint.writeToDisk(current.hashed());
 
-            OPTIONS.notifications.hasSeenDonationPrompt = false;
-            OPTIONS.notifications.hasClearedDonationButton = false;
+            CONFIG.notifications.hasSeenDonationPrompt = false;
+            CONFIG.notifications.hasClearedDonationButton = false;
 
             try {
-                SodiumOptions.writeToDisk(OPTIONS);
+                SodiumGameOptions.writeToDisk(CONFIG);
             } catch (IOException e) {
                 LOGGER.error("Failed to update config file", e);
             }

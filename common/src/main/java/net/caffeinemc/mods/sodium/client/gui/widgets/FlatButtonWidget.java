@@ -1,54 +1,36 @@
 package net.caffeinemc.mods.sodium.client.gui.widgets;
 
-import net.caffeinemc.mods.sodium.client.gui.ButtonTheme;
-import net.caffeinemc.mods.sodium.client.gui.Colors;
-import net.caffeinemc.mods.sodium.client.gui.Layout;
+import com.mojang.blaze3d.platform.cursor.CursorTypes;
 import net.caffeinemc.mods.sodium.client.util.Dim2i;
 import net.minecraft.client.gui.ComponentPath;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Renderable;
 import net.minecraft.client.gui.navigation.FocusNavigationEvent;
+import net.minecraft.client.gui.navigation.ScreenRectangle;
 import net.minecraft.client.input.KeyEvent;
 import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.network.chat.Component;
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-public class FlatButtonWidget extends AbstractWidget implements Renderable {
-    public static final ButtonTheme DEFAULT_THEME = new ButtonTheme(
-            Colors.FOREGROUND, Colors.FOREGROUND, Colors.FOREGROUND_DISABLED,
-            Colors.BACKGROUND_HOVER, Colors.BACKGROUND_DEFAULT, Colors.BACKGROUND_LIGHT);
+import java.util.Objects;
 
+public class FlatButtonWidget extends AbstractWidget implements Renderable {
+    private final Dim2i dim;
     private final Runnable action;
-    private final boolean drawBackground;
-    private final boolean drawFrame;
-    private final boolean leftAlign;
-    private final ButtonTheme theme;
-    private final Component label;
+
+    private @NotNull Style style = Style.defaults();
 
     private boolean selected;
     private boolean enabled = true;
     private boolean visible = true;
 
-    public FlatButtonWidget(Dim2i dim, Component label, Runnable action, boolean drawBackground, boolean drawFrame, boolean leftAlign, ButtonTheme theme) {
-        super(dim);
+    private Component label;
+
+    public FlatButtonWidget(Dim2i dim, Component label, Runnable action) {
+        this.dim = dim;
         this.label = label;
         this.action = action;
-        this.drawBackground = drawBackground;
-        this.drawFrame = drawFrame;
-        this.leftAlign = leftAlign;
-        this.theme = theme;
-    }
-
-    public FlatButtonWidget(Dim2i dim, Component label, Runnable action, boolean drawBackground, boolean leftAlign, ButtonTheme theme) {
-        this(dim, label, action, drawBackground, !drawBackground, leftAlign, theme);
-    }
-
-    public FlatButtonWidget(Dim2i dim, Component label, Runnable action, boolean drawBackground, boolean leftAlign) {
-        this(dim, label, action, drawBackground, leftAlign, DEFAULT_THEME);
-    }
-
-    public FlatButtonWidget(Dim2i dim, Component label, Runnable action, boolean drawBackground, boolean drawFrame, boolean leftAlign) {
-        this(dim, label, action, drawBackground, drawFrame, leftAlign, DEFAULT_THEME);
     }
 
     @Override
@@ -57,31 +39,32 @@ public class FlatButtonWidget extends AbstractWidget implements Renderable {
             return;
         }
 
-        this.hovered = this.isMouseOver(mouseX, mouseY);
+        this.hovered = this.dim.containsCursor(mouseX, mouseY);
 
-        int backgroundColor = this.enabled ? (this.hovered ? this.theme.bgHighlight : this.theme.bgDefault) : this.theme.bgInactive;
-        int textColor = this.getTextColor();
-
-        if (this.drawBackground) {
-            this.drawRect(graphics, this.getX(), this.getY(), this.getLimitX(), this.getLimitY(), backgroundColor);
+        if (hovered) {
+            graphics.requestCursor(this.enabled ? CursorTypes.POINTING_HAND : CursorTypes.NOT_ALLOWED);
         }
 
-        if (this.label != null) {
-            int strWidth = this.font.width(this.label);
-            this.drawString(graphics, this.label, this.leftAlign ? this.getX() + Layout.TEXT_LEFT_PADDING : (this.getCenterX() - (strWidth / 2)), this.getCenterY() - this.font.lineHeight / 2, textColor);
-        }
+        int backgroundColor = this.enabled ? (this.hovered ? this.style.bgHovered : this.style.bgDefault) : this.style.bgDisabled;
+        int textColor = this.enabled ? this.style.textDefault : this.style.textDisabled;
+
+        int strWidth = this.font.width(this.label);
+
+        this.drawRect(graphics, this.dim.x(), this.dim.y(), this.dim.getLimitX(), this.dim.getLimitY(), backgroundColor);
+        this.drawString(graphics, this.label, this.dim.getCenterX() - (strWidth / 2), this.dim.getCenterY() - 4, textColor);
 
         if (this.enabled && this.selected) {
-            this.drawRect(graphics, this.getX(), this.getLimitY() - 1, this.getLimitX(), this.getLimitY(), Colors.THEME);
+            this.drawRect(graphics, this.dim.x(), this.dim.getLimitY() - 1, this.dim.getLimitX(), this.dim.getLimitY(), 0xFF94E4D3);
         }
-
-        if (this.drawFrame || this.enabled && this.isFocused()) {
-            this.drawBorder(graphics, this.getX(), this.getY(), this.getLimitX(), this.getLimitY(), Colors.BUTTON_BORDER);
+        if (this.enabled && this.isFocused()) {
+            this.drawBorder(graphics, this.dim.x(), this.dim.y(), this.dim.getLimitX(), this.dim.getLimitY(), -1);
         }
     }
 
-    protected int getTextColor() {
-        return this.enabled ? this.theme.themeLighter : this.theme.themeDarker;
+    public void setStyle(@NotNull Style style) {
+        Objects.requireNonNull(style);
+
+        this.style = style;
     }
 
     public void setSelected(boolean selected) {
@@ -89,12 +72,12 @@ public class FlatButtonWidget extends AbstractWidget implements Renderable {
     }
 
     @Override
-    public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
+    public boolean mouseClicked(MouseButtonEvent event, boolean repeated) {
         if (!this.enabled || !this.visible) {
             return false;
         }
 
-        if (event.button() == 0 && this.isMouseOver(event.x(), event.y())) {
+        if (event.button() == 0 && this.dim.containsCursor(event.x(), event.y())) {
             doAction();
 
             return true;
@@ -129,6 +112,14 @@ public class FlatButtonWidget extends AbstractWidget implements Renderable {
         this.visible = visible;
     }
 
+    public void setLabel(Component text) {
+        this.label = text;
+    }
+
+    public Component getLabel() {
+        return this.label;
+    }
+
     @Override
     public @Nullable ComponentPath nextFocusPath(FocusNavigationEvent event) {
         if (!this.enabled || !this.visible)
@@ -136,7 +127,29 @@ public class FlatButtonWidget extends AbstractWidget implements Renderable {
         return super.nextFocusPath(event);
     }
 
-    public boolean isVisible() {
-        return this.visible;
+    @Override
+    public boolean isMouseOver(double x, double y) {
+        return this.dim.containsCursor(x, y);
+    }
+
+    @Override
+    public ScreenRectangle getRectangle() {
+        return new ScreenRectangle(this.dim.x(), this.dim.y(), this.dim.width(), this.dim.height());
+    }
+
+    public static class Style {
+        public int bgHovered, bgDefault, bgDisabled;
+        public int textDefault, textDisabled;
+
+        public static Style defaults() {
+            var style = new Style();
+            style.bgHovered = 0xE0000000;
+            style.bgDefault = 0x90000000;
+            style.bgDisabled = 0x60000000;
+            style.textDefault = 0xFFFFFFFF;
+            style.textDisabled = 0x90FFFFFF;
+
+            return style;
+        }
     }
 }
